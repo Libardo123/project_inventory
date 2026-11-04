@@ -1,0 +1,24 @@
+# Archivos generados por el script (no subir al repo)
+AUDITADO_*.xlsx
+
+# Archivos temporales de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Archivos temporales de Windows
+Thumbs.db
+desktop.ini
+*.tmp
+
+# VS Code / IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
