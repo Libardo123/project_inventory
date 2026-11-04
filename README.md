@@ -34,3 +34,4 @@ Equipo/Host  |  Serial Real  |  Estado (OK/Traslado)  |  Sede
 ```
 
 Haz `Ctrl+C` → en la app clic en **PEGAR DESDE EXCEL**.
+
