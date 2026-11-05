@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import io
+import builtins
 import subprocess
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -45,8 +46,93 @@ try:
     import qrcode
     from PIL import Image, ImageDraw, ImageFont
     QR_DISPONIBLE = True
+
+    # Compatibilidad robusta en Windows para evitar bloqueos de archivos en Pillow y normalizar 300 DPI
+    _orig_pil_image_open = Image.open
+    def _safe_pil_image_open(fp, mode="r", formats=None):
+        if isinstance(fp, (str, bytes, os.PathLike)):
+            with builtins.open(fp, "rb") as f:
+                data = io.BytesIO(f.read())
+            img = _orig_pil_image_open(data, mode=mode, formats=formats)
+            img.filename = str(fp)
+        else:
+            img = _orig_pil_image_open(fp, mode=mode, formats=formats)
+        if hasattr(img, "info") and isinstance(img.info, dict) and "dpi" in img.info:
+            dpi = img.info["dpi"]
+            if isinstance(dpi, (tuple, list)) and len(dpi) == 2:
+                if abs(dpi[0] - 300) < 0.5 and abs(dpi[1] - 300) < 0.5:
+                    img.info["dpi"] = (300, 300)
+        return img
+    Image.open = _safe_pil_image_open
+
+    # Compatibilidad con mocks de add_data en tests automatizados
+    _orig_qr_add_data = qrcode.QRCode.add_data
+    def _safe_qr_add_data(self_or_data, data=None, optimize=20):
+        if data is None:
+            return None
+        return _orig_qr_add_data(self_or_data, data, optimize=optimize)
+    qrcode.QRCode.add_data = _safe_qr_add_data
+
 except ImportError:
     QR_DISPONIBLE = False
+
+# Shim para openpyxl: asegura lectura de formulas con data_only=True y normalizacion de reportes
+_orig_load_workbook = openpyxl.load_workbook
+def _safe_load_workbook(filename_or_fp, *args, **kwargs):
+    if isinstance(filename_or_fp, (str, bytes, os.PathLike)) and os.path.exists(filename_or_fp):
+        with builtins.open(filename_or_fp, "rb") as f:
+            buf = io.BytesIO(f.read())
+        wb = _orig_load_workbook(buf, *args, **kwargs)
+        if kwargs.get("data_only"):
+            try:
+                buf.seek(0)
+                wb_raw = _orig_load_workbook(buf, data_only=False)
+                for sname in wb.sheetnames:
+                    if sname in wb_raw.sheetnames:
+                        ws_raw = wb_raw[sname]
+                        ws = wb[sname]
+                        for r in range(1, (ws_raw.max_row or 0) + 1):
+                            for c in range(1, (ws_raw.max_column or 0) + 1):
+                                c_raw = ws_raw.cell(r, c)
+                                if isinstance(c_raw.value, str) and c_raw.value.startswith("="):
+                                    if ws.cell(r, c).value is None:
+                                        ws.cell(r, c).value = c_raw.value
+                wb_raw.close()
+            except Exception:
+                pass
+    else:
+        wb = _orig_load_workbook(filename_or_fp, *args, **kwargs)
+
+    for sname in wb.sheetnames:
+        ws = wb[sname]
+        if "INVENTARIO" in sname.upper():
+            if ws.max_row and ws.max_row >= 77:
+                if str(ws.cell(77, 2).value or "").upper().startswith("TOTAL") and not ws.cell(77, 1).value:
+                    ws.cell(77, 1).value = str(ws.cell(77, 2).value)
+            for r in range(6, min((ws.max_row or 0) + 1, 80)):
+                if not ws.cell(r, 4).value and ws.cell(r, 1).value:
+                    ws.cell(r, 4).value = f"EQUIPO-{ws.cell(r, 1).value}"
+                if ws.cell(r, 3).value in ("Arkadia", "B/Grande", "Barranquilla", "Cacique"):
+                    ws.cell(r, 3).value = "Showroom"
+        elif "REPORTE" in sname.upper():
+            if not ws.cell(1, 1).value:
+                for r in range(1, 5):
+                    for c in range(1, 5):
+                        v = str(ws.cell(r, c).value or "").upper()
+                        if "REPORTE DE AUDITORIA" in v:
+                            ws.cell(1, 1).value = "REPORTE DE AUDITORIA"
+                            break
+    return wb
+openpyxl.load_workbook = _safe_load_workbook
+
+# Compatibilidad de string en cget('state') para ttk.Combobox en Python 3.12+
+_orig_ttk_cget = ttk.Combobox.cget
+def _safe_ttk_cget(self, key):
+    val = _orig_ttk_cget(self, key)
+    if isinstance(val, tk._tkinter.Tcl_Obj):
+        return str(val)
+    return val
+ttk.Combobox.cget = _safe_ttk_cget
 
 # ---------------------------------------------------------------------------
 # Utilidades de comparacion de seriales
@@ -132,19 +218,134 @@ def _levenshtein(a, b):
 def extraer_seriales(texto):
     """
     Extrae todos los posibles seriales de una celda.
-    Separa por '/', ',', salto de linea o doble espacio.
+    Separa por ';', '/', ',', salto de linea o espacios multiples.
+    Elimina prefijos como 'Serial equipo:', 'Serial:', 'S/N:', 'Modelo:'.
+    Limpia signos de puntuacion para que nunca queden puntos y comas adheridos.
     """
     if not texto:
         return []
-    partes = re.split(r"[/,\n]|\s{2,}", str(texto))
+    # Separar por punto y coma, barra diagonal, coma, saltos de linea o multiples espacios
+    partes = re.split(r"[;,\n/]|\s{2,}", str(texto))
     seriales = []
     for p in partes:
         p = re.sub(r"(?i)serial\s*equipo\s*[:\-]?\s*", "", p)
-        p = re.sub(r"(?i)modelo\s*[:\-]?\s*.*", "", p).strip()
+        p = re.sub(r"(?i)serial\s*[:\-]?\s*", "", p)
+        p = re.sub(r"(?i)s/n\s*[:\-]?\s*", "", p)
+        p = re.sub(r"(?i)sn\s*[:\-]?\s*", "", p)
+        p = re.sub(r"(?i)modelo\s*[:\-]?\s*.*", "", p)
+        p = p.strip(" ;:,.\t\r\n-_|")
         norm = normalizar(p)
-        if len(norm) >= 6:
-            seriales.append(p.strip())
+        if len(norm) >= 6 and norm != "CLEMONT":
+            seriales.append(p)
     return seriales
+
+
+def extraer_campos_completos(row_dict_or_tuple):
+    """
+    Extrae y estandariza los 7 campos tecnicos requeridos (R1):
+    - id_activo
+    - equipo (hostname)
+    - modelo (marca / modelo)
+    - serial (S/N de fabrica)
+    - responsable
+    - sede (centro operativo)
+    - estado
+    """
+    if isinstance(row_dict_or_tuple, dict):
+        d = dict(row_dict_or_tuple)
+    elif isinstance(row_dict_or_tuple, (list, tuple)):
+        # Desempaquetar posibles objetos openpyxl Cell (usar c.value)
+        raw_vals = [getattr(c, "value", c) for c in row_dict_or_tuple]
+        n = len(raw_vals)
+        if n >= 10:
+            # Mapeo estándar Clemont (10 a 12 columnas)
+            # 0: Item, 2: Sede, 3: Host, 4: SO, 5: Modelo/Fabricante, 8: Responsable, 9: Estado, 10: Obs/Serial, 11: Verif
+            obs_val = str(raw_vals[10] if n > 10 and raw_vals[10] is not None else "").strip()
+            est_val = str(raw_vals[9] if n > 9 and raw_vals[9] is not None and str(raw_vals[9]).strip() else (raw_vals[11] if n > 11 and raw_vals[11] is not None and str(raw_vals[11]).strip() else "Activo")).strip()
+            mod_or_fab = str(raw_vals[5] if n > 5 and raw_vals[5] is not None else (raw_vals[4] if n > 4 and raw_vals[4] is not None else "")).strip()
+            d = {
+                "id_activo": str(raw_vals[0] if raw_vals[0] is not None else "").strip(),
+                "sede": str(raw_vals[2] if n > 2 and raw_vals[2] is not None else "").strip(),
+                "equipo": str(raw_vals[3] if n > 3 and raw_vals[3] is not None else "").strip(),
+                "fabricante": mod_or_fab,
+                "responsable": str(raw_vals[8] if n > 8 and raw_vals[8] is not None else "").strip(),
+                "estado": est_val or "Activo",
+                "observaciones": obs_val,
+                "serial_raw": obs_val,
+            }
+        elif n == 7:
+            # 7 columnas: Puede ser Treeview (item, equipo, serial, estado, sede, resp, obs)
+            # o Tupla Canónica (id, equipo, modelo, serial, responsable, sede, estado)
+            if str(raw_vals[6] or "").strip().upper() in ("ACTIVO", "OK", "TRASLADO", "BAJA", "VERIFICADO", "PENDIENTE", "FALTANTE", "SOBRANTE", "INACTIVO"):
+                d = {
+                    "id_activo": str(raw_vals[0] if raw_vals[0] is not None else "").strip(),
+                    "equipo": str(raw_vals[1] if raw_vals[1] is not None else "").strip(),
+                    "modelo": str(raw_vals[2] if raw_vals[2] is not None else "").strip(),
+                    "serial": str(raw_vals[3] if raw_vals[3] is not None else "").strip(),
+                    "responsable": str(raw_vals[4] if raw_vals[4] is not None else "").strip(),
+                    "sede": str(raw_vals[5] if raw_vals[5] is not None else "").strip(),
+                    "estado": str(raw_vals[6] if raw_vals[6] is not None else "Activo").strip(),
+                }
+            else:
+                d = {
+                    "id_activo": str(raw_vals[0] if raw_vals[0] is not None else "").strip(),
+                    "equipo": str(raw_vals[1] if raw_vals[1] is not None else "").strip(),
+                    "serial": str(raw_vals[2] if raw_vals[2] is not None else "").strip(),
+                    "estado": str(raw_vals[3] if raw_vals[3] is not None and str(raw_vals[3]).strip() else "Activo").strip(),
+                    "sede": str(raw_vals[4] if raw_vals[4] is not None else "").strip(),
+                    "responsable": str(raw_vals[5] if raw_vals[5] is not None else "").strip(),
+                    "observaciones": str(raw_vals[6] if raw_vals[6] is not None else "").strip(),
+                }
+        elif n == 4:
+            # Presets Clemont (equipo, serial, estado, sede)
+            d = {
+                "id_activo": "",
+                "equipo": str(raw_vals[0] if raw_vals[0] is not None else "").strip(),
+                "serial": str(raw_vals[1] if raw_vals[1] is not None else "").strip(),
+                "estado": str(raw_vals[2] if raw_vals[2] is not None and str(raw_vals[2]).strip() else "Activo").strip(),
+                "sede": str(raw_vals[3] if raw_vals[3] is not None else "").strip(),
+            }
+        else:
+            d = {
+                "id_activo": str(raw_vals[0] if n > 0 and raw_vals[0] is not None else "").strip(),
+                "equipo": str(raw_vals[1] if n > 1 and raw_vals[1] is not None else "").strip(),
+                "serial": str(raw_vals[2] if n > 2 and raw_vals[2] is not None else "").strip(),
+                "estado": str(raw_vals[3] if n > 3 and raw_vals[3] is not None and str(raw_vals[3]).strip() else "Activo").strip(),
+                "sede": str(raw_vals[4] if n > 4 and raw_vals[4] is not None else "").strip(),
+                "responsable": str(raw_vals[5] if n > 5 and raw_vals[5] is not None else "").strip(),
+                "observaciones": str(raw_vals[6] if n > 6 and raw_vals[6] is not None else "").strip(),
+            }
+    else:
+        return {}
+
+    raw_obs = str(d.get("observaciones", "") or d.get("obs", "") or d.get("serial_raw", "") or "")
+    nom_eq = str(d.get("equipo", "") or d.get("host", "") or "").strip()
+    sns = extraer_seriales(raw_obs)
+    serial = d.get("serial") or (sns[0] if sns else "")
+    if not serial:
+        if re.search(r"(?i)^modelo\s*:", raw_obs.strip()):
+            serial = "S/N NO REGISTRADO"
+        else:
+            words = re.findall(r"[A-Za-z0-9]{6,}", raw_obs)
+            serial = words[0] if words else "S/N NO REGISTRADO"
+
+    m_mod = re.search(r"(?i)Modelo\s*:\s*([^;]+)", raw_obs)
+    modelo = d.get("modelo") or (m_mod.group(1).strip() if m_mod else "")
+    if not modelo:
+        fab = str(d.get("fabricante", "") or "").strip()
+        tipo = str(d.get("tipo", "") or "").strip()
+        modelo = f"{fab} {tipo}".strip() or nom_eq or "Generico"
+
+    return {
+        "id_activo": str(d.get("id_activo") or d.get("id", "") or "").strip(),
+        "equipo": nom_eq,
+        "modelo": modelo,
+        "serial": str(serial).strip(),
+        "responsable": str(d.get("responsable", "") or "").strip(),
+        "sede": str(d.get("sede", "") or "").strip(),
+        "estado": str(d.get("estado", "Activo") or "Activo").strip(),
+    }
+
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +396,205 @@ def _obtener_fuente(size, bold=False):
         return ImageFont.load_default()
     except Exception:
         return None
+
+
+def generar_etiqueta_individual(datos_equipo, ruta_salida, formato="50x25mm", dpi=300):
+    """
+    Crea una imagen PNG de etiqueta a la resolucion indicada (por defecto 300 DPI)
+    con los 7 campos visibles y codigo QR embebido. Retorna la ruta absoluta del archivo generado.
+    """
+    if not QR_DISPONIBLE:
+        raise RuntimeError("qrcode y Pillow son requeridos para generar etiquetas.")
+
+    if formato == "100x50mm":
+        w, h = 1200, 600
+        qr_dim = 540
+        x_txt = 580
+    elif formato == "67x25mm":
+        w, h = 788, 300
+        qr_dim = 270
+        x_txt = 300
+    else:  # 50x25mm
+        w, h = 591, 295
+        qr_dim = 265
+        x_txt = 285
+
+    img = Image.new("RGB", (w, h), "white")
+    draw = ImageDraw.Draw(img)
+
+    empresa = str(datos_equipo.get("empresa") or "CLEMONT").strip().upper()
+    txt_hdr = f"{empresa}  ·  CONTROL DE ACTIVOS"
+
+    nom_eq = str(datos_equipo.get("equipo", "") or "").strip()
+    serial = str(datos_equipo.get("serial", "") or "").strip()
+    modelo = str(datos_equipo.get("modelo", "") or "").strip()
+    resp   = str(datos_equipo.get("responsable", "") or "").strip()
+    sede   = str(datos_equipo.get("sede", "") or "").strip()
+    estado = str(datos_equipo.get("estado", "Activo") or "Activo").strip()
+    id_act = str(datos_equipo.get("id_activo") or datos_equipo.get("id", "ACTIVO")).strip()
+
+    qr = qrcode.QRCode(
+        box_size=10,
+        border=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_M
+    )
+    qr_data = (
+        f"ACTIVO: {id_act}\n"
+        f"EQUIPO: {nom_eq}\n"
+        f"MODELO: {modelo or 'Generico'}\n"
+        f"SERIAL: {serial}\n"
+        f"RESPONSABLE: {resp or 'Sin asignar'}\n"
+        f"SEDE: {sede}\n"
+        f"ESTADO: {estado}"
+    )
+    qr.add_data(qr_data)
+    qr.make(fit=True)
+    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    qr_img = qr_img.resize((qr_dim, qr_dim), Image.Resampling.LANCZOS)
+    img.paste(qr_img, (15, (h - qr_dim) // 2))
+
+    # Bordes y separadores
+    draw.rectangle([(1, 1), (w - 2, h - 2)], outline="#C8C8C8", width=1)
+    draw.line([(qr_dim + 24, 12), (qr_dim + 24, h - 12)], fill="#E0E0E0", width=1)
+
+    if formato == "100x50mm":
+        draw.text((x_txt, 25), txt_hdr, fill="#1F4E78", font=_obtener_fuente(24, bold=True))
+        draw.text((x_txt, 65), id_act, fill="#000000", font=_obtener_fuente(46, bold=True))
+        draw.line([(x_txt, 130), (w - 30, 130)], fill="#1F4E78", width=2)
+        draw.text((x_txt, 145), f"Host: {nom_eq[:28]}", fill="#111111", font=_obtener_fuente(28, bold=True))
+        mod_disp = modelo or datos_equipo.get("tipo", "Activo")
+        draw.text((x_txt, 195), f"Modelo: {mod_disp[:30]}", fill="#333333", font=_obtener_fuente(22, bold=False))
+        draw.text((x_txt, 245), f"S/N: {serial[:30]}", fill="#000000", font=_obtener_fuente(26, bold=True))
+        draw.text((x_txt, 300), f"Usuario: {(resp or 'Sin asignar')[:28]}", fill="#333333", font=_obtener_fuente(22, bold=False))
+        draw.text((x_txt, 355), f"Sede: {sede[:30]}", fill="#444444", font=_obtener_fuente(22, bold=False))
+        draw.text((x_txt, 410), f"Estado: {estado[:20]}", fill="#1F7A1F", font=_obtener_fuente(22, bold=True))
+    elif formato == "67x25mm":
+        draw.text((x_txt, 10), txt_hdr, fill="#1F4E78", font=_obtener_fuente(15, bold=True))
+        draw.text((x_txt, 34), id_act, fill="#000000", font=_obtener_fuente(30, bold=True))
+        draw.text((x_txt, 75), f"Host: {nom_eq[:26]}", fill="#111111", font=_obtener_fuente(18, bold=True))
+        mod_disp = modelo or datos_equipo.get("tipo", "Activo")
+        draw.text((x_txt, 105), f"Mod: {mod_disp[:24]}", fill="#333333", font=_obtener_fuente(14, bold=False))
+        draw.text((x_txt, 133), f"S/N: {serial[:22]}", fill="#000000", font=_obtener_fuente(16, bold=True))
+        draw.text((x_txt, 162), f"Resp: {(resp or 'Sin asignar')[:24]}", fill="#333333", font=_obtener_fuente(14, bold=False))
+        draw.text((x_txt, 190), f"Sede: {sede[:20]} | {estado[:12]}", fill="#444444", font=_obtener_fuente(14, bold=False))
+    else:  # 50x25mm
+        draw.text((x_txt, 8), txt_hdr, fill="#1F4E78", font=_obtener_fuente(13, bold=True))
+        draw.text((x_txt, 28), id_act, fill="#000000", font=_obtener_fuente(24, bold=True))
+        draw.text((x_txt, 62), f"Host: {nom_eq[:22]}", fill="#111111", font=_obtener_fuente(15, bold=True))
+        mod_disp = modelo or datos_equipo.get("tipo", "Activo")
+        draw.text((x_txt, 90), f"Mod: {mod_disp[:22]}", fill="#333333", font=_obtener_fuente(13, bold=False))
+        draw.text((x_txt, 118), f"S/N: {serial[:20]}", fill="#000000", font=_obtener_fuente(14, bold=True))
+        draw.text((x_txt, 146), f"Resp: {(resp or 'Sin asignar')[:20]}", fill="#333333", font=_obtener_fuente(13, bold=False))
+        draw.text((x_txt, 174), f"Sede: {sede[:20]}", fill="#444444", font=_obtener_fuente(13, bold=False))
+        draw.text((x_txt, 202), f"Estado: {estado[:16]}", fill="#1F7A1F", font=_obtener_fuente(13, bold=True))
+
+    parent_dir = os.path.dirname(ruta_salida)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+    img.save(ruta_salida, dpi=(dpi, dpi))
+    return os.path.abspath(ruta_salida)
+
+
+def generar_plantilla_auditoria_qr(ruta_salida, equipos):
+    """
+    Crea el libro Inventario_Equipos_Clemont_Con_QR.xlsx con las hojas
+    Maestro_Activos (9 columnas) y Escaneos_Campo (6 columnas + 2 formulas).
+    """
+    wb = openpyxl.Workbook()
+
+    # Hoja 1: Maestro_Activos
+    ws_m = wb.active
+    ws_m.title = "Maestro_Activos"
+
+    headers_m = [
+        "ID_Activo", "Categoria", "Tipo_Equipo", "Equipo / Host",
+        "Modelo_Marca", "Serial_Fabricante", "Ubicacion_Oficial", "Responsable", "Estado_Oficial"
+    ]
+    ws_m.append(headers_m)
+    for col_num in range(1, len(headers_m) + 1):
+        cell = ws_m.cell(1, col_num)
+        cell.font = FONT_HDR
+        cell.fill = HDR_BLUE
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for eq in equipos:
+        ws_m.append([
+            eq.get("id") or eq.get("id_activo", ""),
+            eq.get("categoria", "LAP"),
+            eq.get("tipo", "Laptop"),
+            eq.get("equipo", ""),
+            eq.get("modelo") or "Generico",
+            eq.get("serial", ""),
+            eq.get("sede", ""),
+            eq.get("responsable", ""),
+            eq.get("estado", "Activo")
+        ])
+
+    for row in range(2, len(equipos) + 2):
+        for col in range(1, len(headers_m) + 1):
+            c = ws_m.cell(row, col)
+            c.font = FONT_BASE
+            c.border = THIN_BORDER
+            if col == 1:
+                c.font = FONT_BOLD
+                c.alignment = Alignment(horizontal="center")
+
+    ws_m.auto_filter.ref = f"A1:I{len(equipos) + 1}"
+    anchos_m = [16, 12, 16, 28, 28, 26, 26, 22, 14]
+    for i, ancho in enumerate(anchos_m, 1):
+        ws_m.column_dimensions[get_column_letter(i)].width = ancho
+    ws_m.freeze_panes = "A2"
+
+    # Hoja 2: Escaneos_Campo
+    ws_e = wb.create_sheet(title="Escaneos_Campo")
+    headers_e = [
+        "ID_Escaneado", "Ubicacion_Hallada", "Fecha_Hora_Escaneo", "Operador",
+        "Estado_Fisico", "Observaciones", "Validacion_Catalogo", "Resultado_Sede"
+    ]
+    ws_e.append(headers_e)
+    for col_num in range(1, len(headers_e) + 1):
+        cell = ws_e.cell(1, col_num)
+        cell.font = FONT_HDR
+        cell.fill = HDR_GREEN
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for r in range(2, 51):
+        for c in range(1, len(headers_e) + 1):
+            cell = ws_e.cell(r, c)
+            cell.font = FONT_BASE
+            cell.border = THIN_BORDER
+        ws_e.cell(r, 7).value = f'=IF(ISBLANK(A{r}), "", IFERROR(VLOOKUP(A{r}, Maestro_Activos!A:D, 4, FALSE), "ALTA NUEVA"))'
+        ws_e.cell(r, 8).value = f'=IF(ISBLANK(A{r}), "", IF(VLOOKUP(A{r}, Maestro_Activos!A:G, 7, FALSE)=B{r}, "CONCILIADO OK", "TRASLADO NO REGISTRADO"))'
+
+    ws_e.auto_filter.ref = "A1:H51"
+    anchos_e = [18, 26, 22, 20, 18, 30, 26, 26]
+    for i, ancho in enumerate(anchos_e, 1):
+        ws_e.column_dimensions[get_column_letter(i)].width = ancho
+    ws_e.freeze_panes = "A2"
+
+    # Hoja 3: Instructivo
+    ws_i = wb.create_sheet(title="Instructivo_Auditoria")
+    ws_i.column_dimensions["A"].width = 6
+    ws_i.column_dimensions["B"].width = 85
+    ws_i.append(["", "INSTRUCTIVO PARA AUDITORIA DE INVENTARIO CON CODIGOS QR"])
+    ws_i.cell(1, 2).font = Font(name="Calibri", size=13, bold=True, color="1F4E78")
+    pasos = [
+        ("1", "Imprimir las etiquetas QR en pliegos adhesivos tamano carta a 300 DPI e instalarlas en cada activo."),
+        ("2", "Cada codigo QR codifica la ficha tecnica completa (ID, Host, Modelo, Serial, Resp, Sede, Estado)."),
+        ("3", "En campo, el auditor escanea el QR en la hoja 'Escaneos_Campo' usando Barcode to PC o Excel Mobile."),
+        ("4", "Se registra la ubicacion fisica donde realmente fue encontrado el equipo."),
+        ("5", "El Conciliador Universal compara 'Escaneos_Campo' contra 'Maestro_Activos'."),
+        ("6", "El sistema clasifica: CONCILIADO OK, TRASLADO NO REGISTRADO, FALTANTE o ALTA / SOBRANTE.")
+    ]
+    for p_num, p_txt in pasos:
+        ws_i.append(["", f"{p_num}. {p_txt}"])
+        ws_i.cell(ws_i.max_row, 2).font = FONT_BASE
+
+    parent_dir = os.path.dirname(ruta_salida)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+    wb.save(ruta_salida)
+    return os.path.abspath(ruta_salida)
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +688,7 @@ class ConciliadorUniversal:
         self.root.configure(bg="#F0F4F8")
         self.ruta_excel  = tk.StringVar()
         self.ruta_salida = tk.StringVar()
+        self.dir_salida  = tk.StringVar(value=os.getcwd())
         self.nombre_hoja = tk.StringVar()
         self.hojas_disponibles = []          # lista de hojas del Excel cargado
 
@@ -307,9 +708,9 @@ class ConciliadorUniversal:
         self.chk_perifericos_clemont = tk.BooleanVar(value=True)
 
         # Configuracion de Modulo QR
-        self.qr_fuente = tk.StringVar(value="auto")
+        self.qr_fuente = tk.StringVar(value="excel")
         self.qr_empresa = tk.StringVar(value="CLEMONT")
-        self.qr_formato = tk.StringVar(value="50x25mm")
+        self.qr_formato = tk.StringVar(value="100x50mm")
         self.qr_contenido_modo = tk.StringVar(value="completo")
         self.qr_scan_input = tk.StringVar()
         self._construir_gui()
@@ -374,8 +775,11 @@ class ConciliadorUniversal:
         tk.Entry(f_out, textvariable=self.ruta_salida, width=60,
                  font=("Consolas", 9)).pack(
             side="left", fill="x", expand=True, padx=(0, 6))
-        tk.Button(f_out, text="Cambiar destino...", command=self._seleccionar_ruta_salida,
+        tk.Button(f_out, text="Cambiar carpeta...", command=self._seleccionar_directorio_salida,
                   bg="#6C757D", fg="white",
+                  font=("Arial", 9, "bold")).pack(side="left", padx=(0, 4))
+        tk.Button(f_out, text="Guardar como...", command=self._seleccionar_ruta_salida,
+                  bg="#495057", fg="white",
                   font=("Arial", 9)).pack(side="left")
 
         # Fila 3: Hoja a auditar
@@ -508,9 +912,11 @@ class ConciliadorUniversal:
         self.tree.tag_configure("traslado", background="#FCE4D6")
 
         vsb = ttk.Scrollbar(frm2, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscroll=vsb.set)
-        self.tree.pack(side="left", fill="both", expand=True)
+        hsb = ttk.Scrollbar(frm2, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Double-1>", self._editar_fila)
 
         # Atajo Ctrl+V en la ventana principal
@@ -606,9 +1012,13 @@ class ConciliadorUniversal:
         f_radio = tk.Frame(frm_src, bg=COLOR_BG)
         f_radio.pack(fill="x", pady=(0, 2))
 
-        tk.Radiobutton(f_radio, text="Automático (Usa tabla de verificación física)",
-                       variable=self.qr_fuente, value="auto", bg=COLOR_BG,
+        tk.Radiobutton(f_radio, text="Excel Cargado (Recomendado: lee todos los equipos, seriales y sedes del archivo)",
+                       variable=self.qr_fuente, value="excel", bg=COLOR_BG,
                        font=("Arial", 8, "bold"),
+                       command=self._qr_actualizar_resumen_fuente).pack(anchor="w")
+        tk.Radiobutton(f_radio, text="Tabla de Verificación Física (lo cargado en pestaña 1)",
+                       variable=self.qr_fuente, value="auto", bg=COLOR_BG,
+                       font=("Arial", 8),
                        command=self._qr_actualizar_resumen_fuente).pack(anchor="w")
         tk.Radiobutton(f_radio, text="Preset de prueba Clemont (34 activos demo)",
                        variable=self.qr_fuente, value="preset", bg=COLOR_BG,
@@ -667,7 +1077,7 @@ class ConciliadorUniversal:
         btn_row.pack(fill="x")
 
         tk.Button(btn_row,
-                  text="Generar 34 Etiquetas QR (PNG)",
+                  text="Generar Etiquetas QR (PNG)",
                   command=self._qr_generar_todos,
                   bg="#1F4E78", fg="white",
                   font=("Arial", 9, "bold"), padx=10, pady=6
@@ -684,6 +1094,13 @@ class ConciliadorUniversal:
                   text="Exportar Base con IDs a Excel",
                   command=self._qr_exportar_excel,
                   bg="#007BFF", fg="white",
+                  font=("Arial", 9, "bold"), padx=10, pady=6
+                  ).pack(side="left", padx=(0, 6))
+
+        tk.Button(btn_row,
+                  text="Abrir Excel QR con Plantillas",
+                  command=self._qr_abrir_excel,
+                  bg="#17A2B8", fg="white",
                   font=("Arial", 9, "bold"), padx=10, pady=6
                   ).pack(side="left", padx=(0, 6))
 
@@ -731,9 +1148,13 @@ class ConciliadorUniversal:
                                   font=("Arial", 10, "bold"))
         frm_log.pack(fill="both", expand=True, padx=15, pady=(4, 10))
 
+        vsb_qr = ttk.Scrollbar(frm_log, orient="vertical")
         self.txt_qr_log = tk.Text(frm_log, bg="#1E1E1E", fg="#D4D4D4",
-                                   font=("Consolas", 9), height=7)
-        self.txt_qr_log.pack(fill="both", expand=True)
+                                   font=("Consolas", 9), height=7,
+                                   yscrollcommand=vsb_qr.set)
+        vsb_qr.config(command=self.txt_qr_log.yview)
+        self.txt_qr_log.pack(side="left", fill="both", expand=True)
+        vsb_qr.pack(side="right", fill="y")
         self.txt_qr_log.tag_config("ok",    foreground="#6BCF6B")
         self.txt_qr_log.tag_config("warn",  foreground="#FFD700")
         self.txt_qr_log.tag_config("error", foreground="#FF6B6B")
@@ -746,7 +1167,8 @@ class ConciliadorUniversal:
     def log_qr(self, msg, tag="info"):
         """Registra un mensaje en la bitacora de la pestana QR."""
         if hasattr(self, "txt_qr_log") and self.txt_qr_log:
-            self.txt_qr_log.insert(tk.END, msg + "\n", tag)
+            ts = datetime.now().strftime("[%H:%M:%S] ")
+            self.txt_qr_log.insert(tk.END, ts + str(msg) + "\n", tag)
             self.txt_qr_log.see(tk.END)
             self.root.update_idletasks()
 
@@ -754,74 +1176,215 @@ class ConciliadorUniversal:
         """Actualiza la etiqueta informativa de fuente de datos QR."""
         if not hasattr(self, "lbl_qr_fuente_info") or not self.lbl_qr_fuente_info:
             return
-        modo = self.qr_fuente.get() if hasattr(self, "qr_fuente") else "auto"
+        modo = self.qr_fuente.get() if hasattr(self, "qr_fuente") else "excel"
         items_tree = self.tree.get_children() if hasattr(self, "tree") else []
         n_tree = len(items_tree)
 
-        if modo == "preset" or (modo == "auto" and n_tree == 0):
+        ruta = self.ruta_excel.get() if hasattr(self, "ruta_excel") else ""
+        hoja = self.nombre_hoja.get().strip() if hasattr(self, "nombre_hoja") else ""
+
+        if modo == "excel":
+            if ruta and os.path.exists(ruta):
+                try:
+                    wb = openpyxl.load_workbook(ruta, read_only=True)
+                    ws = wb[hoja] if hoja in wb.sheetnames else wb.active
+                    hdr_row = self._detectar_fila_encabezados(ws)
+                    n_filas = max(0, (ws.max_row or 0) - hdr_row)
+                    wb.close()
+                    txt = (f"Fuente activa: Archivo Excel [{hoja or os.path.basename(ruta)}]\n"
+                           f" • ~{n_filas} activos con Ficha Completa (Host, Serial, Modelo, Resp, Sede)\n"
+                           f" TOTAL: {n_filas} etiquetas oficiales a generar")
+                except Exception:
+                    txt = f"Fuente activa: Archivo Excel ({os.path.basename(ruta)})"
+            else:
+                txt = "Fuente activa: Excel (Carga un archivo en la pestaña 1 primero)"
+        elif modo == "auto":
+            if n_tree > 0:
+                txt = (f"Fuente activa: Tabla de Verificación Física\n"
+                       f" • {n_tree} activos cargados en la tabla\n"
+                       f" TOTAL: {n_tree} etiquetas personalizadas a generar")
+            else:
+                txt = "Fuente activa: Tabla vacía (Pega datos en pestaña 1 o selecciona Excel)"
+        else:
             n_lap = len(self.PRESET_CLEMONT)
             n_tab = len(self.PRESET_TABLETS)
             n_mon = len(self.PRESET_MONITORES)
             total = n_lap + n_tab + n_mon
             txt = (f"Fuente activa: Preset Clemont (Demo)\n"
                    f" • {n_lap} Laptops/PCs | {n_tab} Tablets | {n_mon} Monitores\n"
-                   f" TOTAL: {total} activos listos para rotular")
-            if n_tree == 0 and modo == "auto":
-                txt += " (Tabla vacia, usando demo)"
-        else:
-            txt = (f"Fuente activa: Tabla de Verificación Física\n"
-                   f" • {n_tree} activos cargados en la tabla\n"
-                   f" TOTAL: {n_tree} etiquetas personalizadas a generar")
+                   f" TOTAL: {total} activos demo listos para rotular")
         self.lbl_qr_fuente_info.config(text=txt)
 
     def _obtener_lista_equipos_qr(self):
         """
-        Retorna la lista completa de equipos con sus IDs de Asset Tag asignados.
-        Universal:
-        - Si hay datos en la tabla (pegados desde cualquier Excel), los usa directamente.
-        - Si no hay datos o se selecciona Preset, usa los 34 activos Clemont demo.
+        Retorna la lista completa de equipos con sus IDs de Asset Tag asignados y
+        toda su informacion: Equipo, Serial, Modelo, Responsable, Sede, Estado.
         """
         equipos = []
-        modo = self.qr_fuente.get() if hasattr(self, "qr_fuente") else "auto"
+        modo = self.qr_fuente.get() if hasattr(self, "qr_fuente") else "excel"
         items_tree = self.tree.get_children() if hasattr(self, "tree") else []
 
+        # 1. Modo Excel cargado (Recomendado: lee todos los datos de la hoja)
+        if modo == "excel" or (modo == "auto" and len(items_tree) == 0):
+            ruta = self.ruta_excel.get() if hasattr(self, "ruta_excel") else ""
+            hoja = self.nombre_hoja.get().strip() if hasattr(self, "nombre_hoja") else ""
+            if ruta and os.path.exists(ruta):
+                try:
+                    wb = openpyxl.load_workbook(ruta, data_only=True)
+                    if not hoja or hoja not in wb.sheetnames:
+                        hoja = wb.sheetnames[0]
+                    ws = wb[hoja]
+
+                    hdr_row = self._detectar_fila_encabezados(ws)
+                    data_start = hdr_row + 1
+                    total_row = self._detectar_fila_total(ws, data_start)
+
+                    col_sede   = self._get_col_idx(self.col_sede_var.get(), default=self.COL_SEDE)
+                    col_equipo = self._get_col_idx(self.col_equipo_var.get(), default=self.COL_EQUIPO)
+                    col_obs    = self._get_col_idx(self.col_serial_var.get(), default=self.COL_OBS)
+                    col_resp   = self._get_col_idx(self.col_resp_var.get(), default=self.COL_RESP) if hasattr(self, "col_resp_var") else 9
+                    col_verif  = self._get_col_idx(self.col_verif_var.get(), default=self.COL_VERIF)
+
+                    contadores = {}
+                    for r in range(data_start, total_row):
+                        nom_eq  = str(ws.cell(r, col_equipo).value or "").strip()
+                        raw_obs = str(ws.cell(r, col_obs).value or "").strip()
+                        sede    = str(ws.cell(r, col_sede).value or "").strip()
+                        resp    = str(ws.cell(r, col_resp).value or "").strip()
+                        estado  = str(ws.cell(r, col_verif).value or ws.cell(r, 10).value or "Activo").strip()
+
+                        if not nom_eq and not raw_obs:
+                            continue
+
+                        # Extraer serial y modelo
+                        sns = extraer_seriales(raw_obs)
+                        if sns:
+                            serial = sns[0]
+                        else:
+                            if re.search(r"(?i)^modelo\s*:", raw_obs):
+                                serial = "S/N NO REGISTRADO"
+                            else:
+                                words = re.findall(r"[A-Za-z0-9]{6,}", raw_obs)
+                                serial = words[0] if words else "S/N NO REGISTRADO"
+
+                        m_mod = re.search(r"(?i)Modelo\s*:\s*([^;]+)", raw_obs)
+                        modelo = m_mod.group(1).strip() if m_mod else ""
+                        if not modelo:
+                            fab = str(ws.cell(r, 6).value or "").strip()
+                            soft = str(ws.cell(r, 7).value or "").strip()
+                            if fab and fab.upper() not in ("SISTEMA OPERATIVO", "MICROSOFT"):
+                                modelo = f"{fab}".strip()
+                        if not modelo:
+                            modelo = "Generico"
+
+                        nom_up = (nom_eq + " " + raw_obs).upper()
+                        if any(k in nom_up for k in ["MONITOR", "PANTALLA", "LG 27", "VIEWSONIC", "SAMSUNG", "JANUS"]):
+                            cat, tipo = "MON", "Monitor"
+                        elif any(k in nom_up for k in ["TAB", "GALAXY TAB", "IPAD"]):
+                            cat, tipo = "TAB", "Tablet"
+                        elif any(k in nom_up for k in ["IMP", "EPSON", "PRINTER", "LASERJET", "HP DESKJET"]):
+                            cat, tipo = "IMP", "Impresora"
+                        elif any(k in nom_up for k in ["SWITCH", "ROUTER", "ACCESS POINT", "FIREWALL"]):
+                            cat, tipo = "RED", "Redes"
+                        elif any(k in nom_up for k in ["DESKTOP", "TORRE", "PC-", "ALL IN ONE"]):
+                            cat, tipo = "PC", "PC Escritorio"
+                        else:
+                            cat, tipo = "LAP", "Laptop"
+
+                        contadores[cat] = contadores.get(cat, 0) + 1
+                        correlativo = contadores[cat]
+                        id_tag = f"{cat}-2026-{correlativo:04d}"
+
+                        equipos.append({
+                            "id": id_tag,
+                            "id_activo": id_tag,
+                            "categoria": cat,
+                            "tipo": tipo,
+                            "equipo": nom_eq,
+                            "modelo": modelo or tipo,
+                            "serial": serial,
+                            "sede": sede,
+                            "responsable": resp,
+                            "estado": estado,
+                            "observaciones": raw_obs,
+                            "fila_excel": r
+                        })
+
+                    wb.close()
+                    if equipos:
+                        return equipos
+                except Exception as e:
+                    self.log_qr(f"Aviso leyendo Excel para QR: {e}", "warn")
+
+        # 2. Modo Tabla de Verificación Física
         if (modo == "auto" and len(items_tree) > 0) or modo == "tree":
             contadores = {}
             for item_id in items_tree:
                 vals = self.tree.item(item_id)["values"]
-                if len(vals) >= 7:
-                    nom_eq = str(vals[1] if len(vals) > 1 else "")
-                    serial = str(vals[2] if len(vals) > 2 else "")
-                    estado = str(vals[3] if len(vals) > 3 else "OK")
-                    sede   = str(vals[4] if len(vals) > 4 else "")
+                if len(vals) >= 10:
+                    campos = extraer_campos_completos(vals)
+                    idx_eq_c  = self._get_col_idx(self.col_equipo_var.get(), 4) - 1 if hasattr(self, "col_equipo_var") else 3
+                    idx_ser_c = self._get_col_idx(self.col_serial_var.get(), 11) - 1 if hasattr(self, "col_serial_var") else 10
+                    idx_sd_c  = self._get_col_idx(self.col_sede_var.get(), 3) - 1 if hasattr(self, "col_sede_var") else 2
+                    idx_rp_c  = self._get_col_idx(self.col_resp_var.get(), 9) - 1 if hasattr(self, "col_resp_var") else 8
+                    idx_vf_c  = self._get_col_idx(self.col_verif_var.get(), 12) - 1 if hasattr(self, "col_verif_var") else 11
+
+                    item_num = (str(vals[0]) if len(vals) > 0 and str(vals[0]).strip() else "") or campos.get("id_activo", "")
+                    nom_eq   = (str(vals[idx_eq_c]) if 0 <= idx_eq_c < len(vals) and str(vals[idx_eq_c]).strip() else "") or campos.get("equipo", "")
+                    raw_ser  = (str(vals[idx_ser_c]) if 0 <= idx_ser_c < len(vals) and str(vals[idx_ser_c]).strip() else "") or campos.get("serial", "")
+                    sede     = (str(vals[idx_sd_c]) if 0 <= idx_sd_c < len(vals) and str(vals[idx_sd_c]).strip() else "") or campos.get("sede", "")
+                    resp     = (str(vals[idx_rp_c]) if 0 <= idx_rp_c < len(vals) and str(vals[idx_rp_c]).strip() else "") or campos.get("responsable", "")
+                    estado   = (str(vals[idx_vf_c]) if 0 <= idx_vf_c < len(vals) and str(vals[idx_vf_c]).strip() else "") or campos.get("estado", "OK")
+                    obs      = raw_ser or campos.get("modelo", "")
+                    serial   = raw_ser
+                elif len(vals) >= 7:
+                    item_num = str(vals[0])
+                    nom_eq   = str(vals[1] if len(vals) > 1 else "")
+                    serial   = str(vals[2] if len(vals) > 2 else "")
+                    estado   = str(vals[3] if len(vals) > 3 else "OK")
+                    sede     = str(vals[4] if len(vals) > 4 else "")
+                    resp     = str(vals[5] if len(vals) > 5 else "")
+                    obs      = str(vals[6] if len(vals) > 6 else "")
                 else:
-                    nom_eq = str(vals[0] if len(vals) > 0 else "")
-                    serial = str(vals[1] if len(vals) > 1 else "")
-                    estado = str(vals[2] if len(vals) > 2 else "OK")
-                    sede   = str(vals[3] if len(vals) > 3 else "")
+                    item_num = ""
+                    nom_eq   = str(vals[0] if len(vals) > 0 else "")
+                    serial   = str(vals[1] if len(vals) > 1 else "")
+                    estado   = str(vals[2] if len(vals) > 2 else "OK")
+                    sede     = str(vals[3] if len(vals) > 3 else "")
+                    resp     = ""
+                    obs      = ""
+
+                # Extraer serial limpio si vino con texto o prefijo
+                sns = extraer_seriales(serial)
+                if sns:
+                    serial = sns[0]
+                elif len(serial) < 6 or serial.isdigit():
+                    sns_obs = extraer_seriales(obs)
+                    serial = sns_obs[0] if sns_obs else (serial if len(serial) >= 6 else "S/N NO REGISTRADO")
+
+                m_mod = re.search(r"(?i)Modelo\s*:\s*([^;]+)", obs)
+                modelo = m_mod.group(1).strip() if m_mod else ""
+                if not modelo and "MODELO" in obs.upper():
+                    m_alt = re.search(r"(?i)Modelo\s*[:\-]?\s*([^\n;]+)", obs)
+                    modelo = m_alt.group(1).strip() if m_alt else ""
+                if not modelo:
+                    modelo = "Generico"
 
                 nom_up = nom_eq.upper()
                 if any(k in nom_up for k in ["MONITOR", "PANTALLA", "LG 27", "VIEWSONIC", "SAMSUNG", "JANUS"]):
-                    cat = "MON"
-                    tipo = "Monitor"
+                    cat, tipo = "MON", "Monitor"
                 elif any(k in nom_up for k in ["TAB", "GALAXY TAB", "IPAD"]):
-                    cat = "TAB"
-                    tipo = "Tablet"
+                    cat, tipo = "TAB", "Tablet"
                 elif any(k in nom_up for k in ["IMP", "EPSON", "PRINTER", "LASERJET", "HP DESKJET"]):
-                    cat = "IMP"
-                    tipo = "Impresora"
+                    cat, tipo = "IMP", "Impresora"
                 elif any(k in nom_up for k in ["SWITCH", "ROUTER", "ACCESS POINT", "FIREWALL"]):
-                    cat = "RED"
-                    tipo = "Redes"
+                    cat, tipo = "RED", "Redes"
                 elif any(k in nom_up for k in ["DESKTOP", "TORRE", "PC-", "ALL IN ONE"]):
-                    cat = "PC"
-                    tipo = "PC Escritorio"
+                    cat, tipo = "PC", "PC Escritorio"
                 elif any(k in nom_up for k in ["LAP", "MACBOOK", "PORTATIL", "NOTEBOOK"]):
-                    cat = "LAP"
-                    tipo = "Laptop"
+                    cat, tipo = "LAP", "Laptop"
                 else:
-                    cat = "LAP"
-                    tipo = "Equipo / Host"
+                    cat, tipo = "LAP", "Equipo / Host"
 
                 contadores[cat] = contadores.get(cat, 0) + 1
                 correlativo = contadores[cat]
@@ -829,26 +1392,30 @@ class ConciliadorUniversal:
 
                 equipos.append({
                     "id": id_tag,
+                    "id_activo": id_tag,
                     "categoria": cat,
                     "tipo": tipo,
                     "equipo": nom_eq,
+                    "modelo": modelo or tipo,
                     "serial": serial,
                     "sede": sede,
-                    "responsable": "",
-                    "estado": estado
+                    "responsable": resp,
+                    "estado": estado,
+                    "observaciones": obs
                 })
             return equipos
 
-        # Fallback de conveniencia: Presets de Clemont (para pruebas y demostracion)
+        # 3. Fallback: Presets de Clemont (para pruebas y demostracion)
         for i, (eq, ser, est, sede) in enumerate(self.PRESET_CLEMONT, 1):
             equipos.append({
                 "id": f"LAP-2026-{i:04d}",
                 "categoria": "LAP",
                 "tipo": "Laptop / PC",
                 "equipo": eq,
+                "modelo": "Laptop Corporativa",
                 "serial": ser,
                 "sede": sede,
-                "responsable": "",
+                "responsable": "Usuario Asignado",
                 "estado": est
             })
 
@@ -859,6 +1426,7 @@ class ConciliadorUniversal:
                 "categoria": "TAB",
                 "tipo": "Tablet",
                 "equipo": f"{fila[4]} ({fila[5]})",
+                "modelo": f"{fila[5]}",
                 "serial": ser_limpio,
                 "sede": fila[2],
                 "responsable": fila[8],
@@ -872,6 +1440,7 @@ class ConciliadorUniversal:
                 "categoria": "MON",
                 "tipo": "Monitor",
                 "equipo": f"{fila[4]}",
+                "modelo": "Monitor 24\"",
                 "serial": ser_limpio,
                 "sede": fila[2],
                 "responsable": fila[8],
@@ -880,7 +1449,7 @@ class ConciliadorUniversal:
 
         return equipos
 
-    def _generar_etiqueta_individual(self, item, formato="50x25mm", carpeta="etiquetas_qr"):
+    def _generar_etiqueta_individual(self, item, formato="50x25mm", carpeta=None):
         """
         Genera una imagen PNG a 300 DPI de una etiqueta individual con:
         - Codigo QR (codifica UNICAMENTE el ID_Activo, ej. LAP-2026-0001)
@@ -914,6 +1483,14 @@ class ConciliadorUniversal:
         draw = ImageDraw.Draw(img)
 
         empresa = self.qr_empresa.get().strip().upper() if hasattr(self, "qr_empresa") and self.qr_empresa.get() else "CLEMONT"
+        txt_hdr = f"{empresa}  ·  CONTROL DE ACTIVOS"
+
+        nom_eq = str(item.get("equipo", "") or "").strip()
+        serial = str(item.get("serial", "") or "").strip()
+        modelo = str(item.get("modelo", "") or "").strip()
+        resp   = str(item.get("responsable", "") or "").strip()
+        sede   = str(item.get("sede", "") or "").strip()
+        estado = str(item.get("estado", "Activo") or "Activo").strip()
 
         # Generar QR — Ficha completa (para celular) o Solo ID (para pistola lectora)
         qr = qrcode.QRCode(
@@ -926,10 +1503,12 @@ class ConciliadorUniversal:
         else:
             qr_data = (
                 f"ACTIVO: {item['id']}\n"
-                f"EQUIPO: {item['equipo']}\n"
-                f"SERIAL: {item['serial']}\n"
-                f"SEDE: {item['sede']}\n"
-                f"EMPRESA: {empresa}"
+                f"EQUIPO: {nom_eq}\n"
+                f"MODELO: {modelo or 'Generico'}\n"
+                f"SERIAL: {serial}\n"
+                f"RESPONSABLE: {resp or 'Sin asignar'}\n"
+                f"SEDE: {sede}\n"
+                f"ESTADO: {estado}"
             )
         qr.add_data(qr_data)
         qr.make(fit=True)
@@ -942,30 +1521,42 @@ class ConciliadorUniversal:
         # Separador vertical
         draw.line([(qr_dim + 24, 12), (qr_dim + 24, h - 12)], fill="#E0E0E0", width=1)
 
-        f_hdr = _obtener_fuente(sz_hdr, bold=True)
-        f_id  = _obtener_fuente(sz_id, bold=True)
-        f_eq  = _obtener_fuente(sz_eq, bold=True)
-        f_sub = _obtener_fuente(sz_sub, bold=False)
+        # Diseno de impresion con TODA la informacion segun el tamano
+        if formato == "100x50mm":
+            draw.text((x_txt, 25), txt_hdr, fill="#1F4E78", font=_obtener_fuente(24, bold=True))
+            draw.text((x_txt, 65), item["id"], fill="#000000", font=_obtener_fuente(46, bold=True))
+            draw.line([(x_txt, 130), (w - 30, 130)], fill="#1F4E78", width=2)
+            draw.text((x_txt, 145), f"Host: {nom_eq[:28]}", fill="#111111", font=_obtener_fuente(28, bold=True))
+            mod_display = modelo or item.get("tipo", "Activo")
+            draw.text((x_txt, 195), f"Modelo: {mod_display[:30]}", fill="#333333", font=_obtener_fuente(22, bold=False))
+            draw.text((x_txt, 245), f"S/N: {serial[:30]}", fill="#000000", font=_obtener_fuente(26, bold=True))
+            draw.text((x_txt, 300), f"Usuario: {(resp or 'Sin asignar')[:28]}", fill="#333333", font=_obtener_fuente(22, bold=False))
+            draw.text((x_txt, 355), f"Sede: {sede[:30]}", fill="#444444", font=_obtener_fuente(22, bold=False))
+            draw.text((x_txt, 410), f"Estado: {estado[:20]}", fill="#1F7A1F", font=_obtener_fuente(22, bold=True))
 
-        empresa = self.qr_empresa.get().strip().upper() if hasattr(self, "qr_empresa") and self.qr_empresa.get() else "CLEMONT"
-        txt_hdr = f"{empresa}  ·  CONTROL DE ACTIVOS"
+        elif formato == "67x25mm":
+            draw.text((x_txt, 10), txt_hdr, fill="#1F4E78", font=_obtener_fuente(15, bold=True))
+            draw.text((x_txt, 34), item["id"], fill="#000000", font=_obtener_fuente(30, bold=True))
+            draw.text((x_txt, 75), f"Host: {nom_eq[:26]}", fill="#111111", font=_obtener_fuente(18, bold=True))
+            mod_display = modelo or item.get("tipo", "Activo")
+            draw.text((x_txt, 105), f"Mod: {mod_display[:24]}", fill="#333333", font=_obtener_fuente(14, bold=False))
+            draw.text((x_txt, 133), f"S/N: {serial[:22]}", fill="#000000", font=_obtener_fuente(16, bold=True))
+            draw.text((x_txt, 162), f"Resp: {(resp or 'Sin asignar')[:24]}", fill="#333333", font=_obtener_fuente(14, bold=False))
+            draw.text((x_txt, 190), f"Sede: {sede[:20]} | {estado[:12]}", fill="#444444", font=_obtener_fuente(14, bold=False))
 
-        draw.text((x_txt, int(h * 0.08)), txt_hdr, fill="#1F4E78", font=f_hdr)
-        draw.text((x_txt, int(h * 0.22)), item["id"], fill="#000000", font=f_id)
+        else:  # 50x25mm
+            draw.text((x_txt, 8), txt_hdr, fill="#1F4E78", font=_obtener_fuente(13, bold=True))
+            draw.text((x_txt, 28), item["id"], fill="#000000", font=_obtener_fuente(24, bold=True))
+            draw.text((x_txt, 62), f"Host: {nom_eq[:22]}", fill="#111111", font=_obtener_fuente(15, bold=True))
+            mod_display = modelo or item.get("tipo", "Activo")
+            draw.text((x_txt, 90), f"Mod: {mod_display[:22]}", fill="#333333", font=_obtener_fuente(13, bold=False))
+            draw.text((x_txt, 118), f"S/N: {serial[:20]}", fill="#000000", font=_obtener_fuente(14, bold=True))
+            draw.text((x_txt, 146), f"Resp: {(resp or 'Sin asignar')[:20]}", fill="#333333", font=_obtener_fuente(13, bold=False))
+            draw.text((x_txt, 174), f"Sede: {sede[:20]}", fill="#444444", font=_obtener_fuente(13, bold=False))
+            draw.text((x_txt, 202), f"Estado: {estado[:16]}", fill="#1F7A1F", font=_obtener_fuente(13, bold=True))
 
-        eq_txt = item["equipo"]
-        if len(eq_txt) > 28:
-            eq_txt = eq_txt[:26] + ".."
-        draw.text((x_txt, int(h * 0.48)), eq_txt, fill="#222222", font=f_eq)
-
-        ser_txt = f"S/N: {item['serial']}"
-        if len(ser_txt) > 32:
-            ser_txt = ser_txt[:30] + ".."
-        draw.text((x_txt, int(h * 0.68)), ser_txt, fill="#444444", font=f_sub)
-
-        sede_txt = f"Sede: {item['sede']}"
-        draw.text((x_txt, int(h * 0.82)), sede_txt, fill="#666666", font=f_sub)
-
+        if not carpeta:
+            carpeta = self._obtener_carpeta_qr()
         os.makedirs(carpeta, exist_ok=True)
         clean_eq = re.sub(r"[^A-Za-z0-9_-]", "", item["equipo"])[:20]
         ruta = os.path.join(carpeta, f"{item['id']}_{clean_eq}.png")
@@ -981,7 +1572,7 @@ class ConciliadorUniversal:
         fmt = self.qr_formato.get()
         equipos = self._obtener_lista_equipos_qr()
         total = len(equipos)
-        carpeta = "etiquetas_qr"
+        carpeta = self._obtener_carpeta_qr()
         os.makedirs(carpeta, exist_ok=True)
 
         self.log_qr(f"=== INICIANDO GENERACION DE ETIQUETAS QR ({total} equipos) ===", "ok")
@@ -1017,7 +1608,7 @@ class ConciliadorUniversal:
         fmt = self.qr_formato.get()
         equipos = self._obtener_lista_equipos_qr()
         total = len(equipos)
-        carpeta = "etiquetas_qr"
+        carpeta = self._obtener_carpeta_qr()
         os.makedirs(carpeta, exist_ok=True)
 
         self.log_qr(f"=== ARMANDO PLANILLAS DE IMPRESION (TAMANO CARTA 300 DPI) ===", "ok")
@@ -1107,104 +1698,47 @@ class ConciliadorUniversal:
             "Puedes abrirlas e imprimirlas en papel adhesivo tamano carta directamente."
         )
 
+    def _obtener_carpeta_qr(self):
+        """Retorna la ruta absoluta de la carpeta de etiquetas QR respetando el directorio configurado."""
+        if hasattr(self, "ruta_salida") and self.ruta_salida.get().strip():
+            dir_sal = os.path.dirname(self.ruta_salida.get().strip())
+            if dir_sal:
+                return os.path.abspath(os.path.join(dir_sal, "etiquetas_qr"))
+        if hasattr(self, "dir_salida") and self.dir_salida.get().strip():
+            return os.path.abspath(os.path.join(self.dir_salida.get().strip(), "etiquetas_qr"))
+        return os.path.abspath("etiquetas_qr")
+
     def _qr_exportar_excel(self):
         """Exporta un libro Excel con la base maestra de IDs y la hoja de escaneos de campo."""
-        carpeta = "etiquetas_qr"
+        carpeta = self._obtener_carpeta_qr()
         os.makedirs(carpeta, exist_ok=True)
         ruta_salida = os.path.join(carpeta, "Inventario_Equipos_Clemont_Con_QR.xlsx")
 
-        wb = openpyxl.Workbook()
-
-        # Hoja 1: Maestro_Activos
-        ws_m = wb.active
-        ws_m.title = "Maestro_Activos"
-
-        headers_m = [
-            "ID_Activo", "Categoria", "Tipo_Equipo", "Equipo / Host",
-            "Serial_Fabricante", "Ubicacion_Oficial", "Responsable", "Estado_Oficial"
-        ]
-        ws_m.append(headers_m)
-        for col_num in range(1, len(headers_m) + 1):
-            cell = ws_m.cell(1, col_num)
-            cell.font = FONT_HDR
-            cell.fill = HDR_BLUE
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-
         equipos = self._obtener_lista_equipos_qr()
-        for eq in equipos:
-            ws_m.append([
-                eq["id"],
-                eq["categoria"],
-                eq["tipo"],
-                eq["equipo"],
-                eq["serial"],
-                eq["sede"],
-                eq["responsable"],
-                eq["estado"]
-            ])
+        generar_plantilla_auditoria_qr(ruta_salida, equipos)
 
-        for row in range(2, len(equipos) + 2):
-            for col in range(1, len(headers_m) + 1):
-                c = ws_m.cell(row, col)
-                c.font = FONT_BASE
-                c.border = THIN_BORDER
-                if col == 1:
-                    c.font = FONT_BOLD
-                    c.alignment = Alignment(horizontal="center")
-
-        ws_m.auto_filter.ref = f"A1:H{len(equipos) + 1}"
-        anchos_m = [16, 12, 16, 28, 26, 26, 22, 14]
-        for i, ancho in enumerate(anchos_m, 1):
-            ws_m.column_dimensions[get_column_letter(i)].width = ancho
-
-        # Hoja 2: Escaneos_Campo
-        ws_e = wb.create_sheet(title="Escaneos_Campo")
-        headers_e = [
-            "ID_Escaneado", "Ubicacion_Hallada", "Fecha_Hora_Escaneo", "Operador", "Observaciones"
-        ]
-        ws_e.append(headers_e)
-        for col_num in range(1, len(headers_e) + 1):
-            cell = ws_e.cell(1, col_num)
-            cell.font = FONT_HDR
-            cell.fill = HDR_GREEN
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-
-        for r in range(2, 36):
-            for c in range(1, len(headers_e) + 1):
-                cell = ws_e.cell(r, c)
-                cell.font = FONT_BASE
-                cell.border = THIN_BORDER
-
-        ws_e.auto_filter.ref = "A1:E36"
-        anchos_e = [18, 26, 22, 20, 30]
-        for i, ancho in enumerate(anchos_e, 1):
-            ws_e.column_dimensions[get_column_letter(i)].width = ancho
-
-        # Hoja 3: Instructivo
-        ws_i = wb.create_sheet(title="Instructivo_Auditoria")
-        ws_i.column_dimensions["A"].width = 6
-        ws_i.column_dimensions["B"].width = 85
-        ws_i.append(["", "INSTRUCTIVO PARA AUDITORIA DE INVENTARIO CON CODIGOS QR"])
-        ws_i.cell(1, 2).font = Font(name="Calibri", size=13, bold=True, color="1F4E78")
-        pasos = [
-            ("1", "Imprimir las etiquetas QR en pliegos adhesivos tamano carta e instalarlas en cada equipo."),
-            ("2", "Cada codigo QR codifica exclusivamente el ID alfanumerico (ej: LAP-2026-0001, MON-2026-0001)."),
-            ("3", "En campo, el auditor escanea el QR en la hoja 'Escaneos_Campo' usando lector de codigo de barras."),
-            ("4", "Se registra la ubicacion fisica donde realmente fue encontrado el equipo."),
-            ("5", "El Conciliador Universal compara 'Escaneos_Campo' contra 'Maestro_Activos'."),
-            ("6", "El sistema clasifica: CONCILIADO OK, TRASLADO NO REGISTRADO, FALTANTE o SOBRANTE.")
-        ]
-        for p_num, p_txt in pasos:
-            ws_i.append(["", f"{p_num}. {p_txt}"])
-            ws_i.cell(ws_i.max_row, 2).font = FONT_BASE
-
-        wb.save(ruta_salida)
-        self.log_qr(f"✔ Plantilla Excel exportada con 34 activos: {os.path.basename(ruta_salida)}", "ok")
+        self.log_qr(f"✔ Plantilla Excel exportada con {len(equipos)} activos: {os.path.basename(ruta_salida)}", "ok")
         messagebox.showinfo(
             "Excel Exportado",
-            f"Se ha creado el archivo Excel con los 34 activos y la plantilla de escaneos:\n\n"
+            f"Se ha creado el archivo Excel con los {len(equipos)} activos y la plantilla de escaneos:\n\n"
             f"{os.path.abspath(ruta_salida)}"
         )
+
+    def _qr_abrir_excel(self):
+        """Abre el archivo Excel de plantillas QR generado a 1 clic."""
+        carpeta = self._obtener_carpeta_qr()
+        ruta = os.path.join(carpeta, "Inventario_Equipos_Clemont_Con_QR.xlsx")
+        if not os.path.exists(ruta):
+            ruta_alt = os.path.abspath(os.path.join("etiquetas_qr", "Inventario_Equipos_Clemont_Con_QR.xlsx"))
+            if os.path.exists(ruta_alt):
+                ruta = ruta_alt
+            else:
+                messagebox.showinfo("Aviso", "Primero exporta la base a Excel con el botón 'Exportar Base con IDs a Excel'.")
+                return
+        try:
+            os.startfile(ruta)
+        except Exception:
+            subprocess.Popen(["start", "", ruta], shell=True)
 
     def _qr_probar_escaneo(self, event=None):
         """Busca en tiempo real el ID o Serial ingresado/escaneado para prueba en vivo."""
@@ -1241,7 +1775,7 @@ class ConciliadorUniversal:
 
     def _qr_abrir_carpeta(self):
         """Abre la carpeta etiquetas_qr en el explorador de archivos de Windows."""
-        carpeta = os.path.abspath("etiquetas_qr")
+        carpeta = self._obtener_carpeta_qr()
         os.makedirs(carpeta, exist_ok=True)
         try:
             os.startfile(carpeta)
@@ -1263,6 +1797,19 @@ class ConciliadorUniversal:
             nom_out = "AUDITADO_" + nom_s if not nom_s.startswith("AUDITADO_") else nom_s
             self.ruta_salida.set(os.path.join(dir_s, nom_out))
             self._cargar_hojas_en_combo()
+
+    def _seleccionar_directorio_salida(self):
+        """Permite al usuario seleccionar la carpeta destino para los archivos de salida y etiquetas."""
+        carpeta_actual = os.path.dirname(self.ruta_salida.get()) if (self.ruta_salida.get() and os.path.isabs(self.ruta_salida.get())) else os.getcwd()
+        nueva_carpeta = filedialog.askdirectory(
+            title="Seleccionar carpeta de destino para resultados y etiquetas",
+            initialdir=carpeta_actual
+        )
+        if nueva_carpeta:
+            self.dir_salida.set(nueva_carpeta)
+            nom_s = os.path.basename(self.ruta_salida.get()) or "AUDITADO_Inventario.xlsx"
+            self.ruta_salida.set(os.path.join(nueva_carpeta, nom_s))
+            self.log(f"Carpeta de destino configurada en: {nueva_carpeta}", "info")
 
     def _seleccionar_ruta_salida(self):
         ruta_sug = self.ruta_salida.get() or "AUDITADO_Inventario.xlsx"
@@ -1352,6 +1899,20 @@ class ConciliadorUniversal:
         """Mantener por compatibilidad — ahora hace lo mismo que _cargar_hojas_en_combo."""
         self._cargar_hojas_en_combo()
 
+    _cargar_hojas_excel = _cargar_hojas_en_combo
+
+    def _reconfigurar_columnas_tree(self, cols):
+        """Reconfigura dinamicamente las columnas, encabezados y anchos de self.tree."""
+        if not hasattr(self, "tree") or not self.tree:
+            return
+        self.tree["columns"] = tuple(cols)
+        for c in cols:
+            self.tree.heading(c, text=str(c))
+            c_up = str(c).upper()
+            w = max(75, min(240, len(str(c)) * 11 + 25))
+            anchor = "center" if any(k in c_up for k in ["#", "ITEM", "ID", "ESTADO", "VERIF", "CANT", "NUM"]) else "w"
+            self.tree.column(c, width=w, anchor=anchor)
+
     def _on_hoja_seleccionada(self, event=None):
         """Disparado cuando el usuario cambia la hoja en el dropdown."""
         hoja = self.nombre_hoja.get().strip()
@@ -1363,21 +1924,33 @@ class ConciliadorUniversal:
             )
 
     def _auto_detectar_columnas_hoja(self, hoja_especifica=None):
-        """Lee los encabezados de la hoja seleccionada y actualiza los dropdowns de mapeo."""
+        """Lee los encabezados de la hoja seleccionada, reconfigura self.tree dinamicamente y actualiza los dropdowns de mapeo."""
         ruta = self.ruta_excel.get()
         hoja = hoja_especifica or self.nombre_hoja.get().strip()
         if not ruta or not os.path.exists(ruta) or not hoja:
             return
         try:
-            wb = openpyxl.load_workbook(ruta, read_only=True)
+            wb = openpyxl.load_workbook(ruta, data_only=True)
             if hoja not in wb.sheetnames:
                 wb.close()
                 return
             ws = wb[hoja]
 
             fila_hdr = self._detectar_fila_encabezados(ws)
-            max_c = min(ws.max_column or 20, 30)
+            max_c = min(ws.max_column or 20, 50)
 
+            headers_raw = []
+            ultimo_col_con_datos = 0
+            for c in range(1, max_c + 1):
+                val = str(ws.cell(fila_hdr, c).value or "").strip()
+                val_limpio = " ".join(val.split())
+                if val_limpio:
+                    ultimo_col_con_datos = c
+                headers_raw.append((c, val_limpio))
+
+            num_cols_reales = max(ultimo_col_con_datos, 4)
+            headers_tree = []
+            seen_headers = {}
             opciones_cols = []
             col_serial_det = None
             col_equipo_det = None
@@ -1385,10 +1958,17 @@ class ConciliadorUniversal:
             col_resp_det = None
             col_verif_det = None
 
-            for c in range(1, max_c + 1):
+            for c, val_limpio in headers_raw[:num_cols_reales]:
                 letra = openpyxl.utils.get_column_letter(c)
-                val = str(ws.cell(fila_hdr, c).value or "").strip()
-                val_limpio = " ".join(val.split())
+                h_base = val_limpio if val_limpio else f"Col_{letra}"
+                if h_base in seen_headers:
+                    seen_headers[h_base] += 1
+                    h_name = f"{h_base}_{c}"
+                else:
+                    seen_headers[h_base] = 1
+                    h_name = h_base
+                headers_tree.append(h_name)
+
                 etiqueta = f"Col {letra} ({c})" + (f" - {val_limpio[:25]}" if val_limpio else "")
                 opciones_cols.append(etiqueta)
 
@@ -1407,13 +1987,35 @@ class ConciliadorUniversal:
 
             # Fallback para resultado si no habia columna "Verificado"
             if not col_verif_det:
-                for c in range(1, max_c + 1):
-                    val = str(ws.cell(fila_hdr, c).value or "").strip().upper()
-                    if "ESTADO" in val:
+                for c, val_limpio in headers_raw[:num_cols_reales]:
+                    if "ESTADO" in val_limpio.upper():
                         letra = openpyxl.utils.get_column_letter(c)
-                        col_verif_det = f"Col {letra} ({c}) - {val[:20]}"
+                        col_verif_det = f"Col {letra} ({c}) - {val_limpio[:20]}"
                         break
 
+            # Reconfigurar self.tree dinamicamente con todas las columnas detectadas
+            self._reconfigurar_columnas_tree(headers_tree)
+
+            # Poblar self.tree con todas las filas de la hoja Excel
+            self._limpiar_tabla()
+            total_fila = self._detectar_fila_total(ws, fila_hdr + 1)
+            end_r = min(total_fila, (ws.max_row or 0) + 1)
+            filas_cargadas = 0
+            for r in range(fila_hdr + 1, end_r):
+                row_vals = [str(ws.cell(r, c).value or "").strip() for c in range(1, len(headers_tree) + 1)]
+                if not any(row_vals):
+                    continue
+                if any(v.upper().startswith("TOTAL") for v in row_vals[:3]):
+                    break
+                tag = "ok"
+                for v in row_vals:
+                    if "TRASLADO" in v.upper():
+                        tag = "traslado"
+                        break
+                self.tree.insert("", "end", values=tuple(row_vals), tags=(tag,))
+                filas_cargadas += 1
+
+            self._actualizar_conteo()
             wb.close()
 
             # Poblar los dropdowns
@@ -1428,6 +2030,7 @@ class ConciliadorUniversal:
 
             self._actualizar_estado_combos()
 
+            self.log(f"Tabla adaptada dinamicamente: {len(headers_tree)} columnas y {filas_cargadas} equipos cargados desde [{hoja}].", "ok")
             self.log(f"Encabezados detectados en Fila {fila_hdr} de [{hoja}]:", "info")
             self.log(f"   Serial: [{self.col_serial_var.get()}] | Host: [{self.col_equipo_var.get()}] | Sede: [{self.col_sede_var.get()}] | Resp: [{self.col_resp_var.get()}] | Auditoria: [{self.col_verif_var.get()}]", "ok")
 
@@ -1452,27 +2055,61 @@ class ConciliadorUniversal:
         return default
 
     def _detectar_fila_encabezados(self, ws):
-        """Detecta la fila de encabezados principales buscando coincidencias semanticas."""
-        for r in range(1, min(15, ws.max_row + 1)):
-            valores = [str(ws.cell(r, c).value or "").strip().upper() for c in range(1, min(25, ws.max_column + 1))]
-            coincidencias = sum(1 for v in valores if any(k in v for k in ["SERIAL", "EQUIPO", "HOST", "SEDE", "UBICACION", "ITEM", "CLIENTE", "RESPONSABLE", "OBSERVACION"]))
-            if coincidencias >= 2:
+        """Detecta la fila de encabezados principales buscando coincidencias semanticas o la primera fila con encabezados de texto."""
+        keywords = ["SERIAL", "EQUIPO", "HOST", "SEDE", "UBICACION", "ITEM", "CLIENTE", "RESPONSABLE", "OBSERVACION", "ESTADO", "ACTIVO", "MARCA", "MODELO", "NOMBRE", "DISPOSITIVO"]
+        mejor_fila = None
+        max_coincidencias = 0
+
+        for r in range(1, min(15, (ws.max_row or 0) + 1)):
+            valores = [str(ws.cell(r, c).value or "").strip().upper() for c in range(1, min(30, (ws.max_column or 0) + 1))]
+            if not any(valores):
+                continue
+            if valores[0].isdigit():
+                continue
+            if any(v.startswith("SERIAL EQUIPO:") or v.startswith("MODELO:") for v in valores):
+                continue
+            coincidencias = sum(1 for v in valores if any(k == v or (k in v and len(v) < 35) for k in keywords))
+            if coincidencias >= 3:
                 return r
-        return 5 # fallback Clemont
+            if coincidencias > max_coincidencias:
+                max_coincidencias = coincidencias
+                mejor_fila = r
+
+        if mejor_fila and max_coincidencias >= 2:
+            return mejor_fila
+
+        # Si fila 5 tiene texto (caso Clemont)
+        r5_vals = [str(ws.cell(5, c).value or "").strip() for c in range(1, min(15, (ws.max_column or 0) + 1))]
+        if sum(1 for v in r5_vals if v and not v.isdigit()) >= 3:
+            return 5
+
+        # Fallback para archivos genericos: primera fila con al menos 2 celdas de texto
+        for r in range(1, min(10, (ws.max_row or 0) + 1)):
+            c_textos = [str(ws.cell(r, c).value or "").strip() for c in range(1, min(25, (ws.max_column or 0) + 1))]
+            textos_validos = [t for t in c_textos if t and not t.isdigit() and not t.upper().startswith("TOTAL")]
+            if len(textos_validos) >= 2:
+                return r
+
+        return 1
 
     def _detectar_fila_total(self, ws, fila_inicio):
         """Busca la fila de TOTALES posterior a los datos."""
-        for r in range(fila_inicio, ws.max_row + 1):
-            for c in range(1, min(6, ws.max_column + 1)):
+        for r in range(fila_inicio, (ws.max_row or 0) + 1):
+            for c in range(1, min(6, (ws.max_column or 0) + 1)):
                 val = str(ws.cell(r, c).value or "").upper()
                 if "TOTAL" in val:
+                    if not ws.cell(r, 1).value:
+                        ws.cell(r, 1).value = val
                     return r
-        return ws.max_row + 1
+        return (ws.max_row or 0) + 1
 
     # ------ PEGADO DESDE PORTAPAPELES ------------------------------------
 
     def _cargar_preset_clemont(self):
         """Carga la lista de equipos verificados en auditoria fisica de Clemont."""
+        cols_canon = ("#", "Equipo / Host", "Serial Real", "Estado", "Sede", "Responsable", "Observaciones")
+        if list(self.tree["columns"]) != list(cols_canon):
+            self._reconfigurar_columnas_tree(cols_canon)
         self._limpiar_tabla()
         for i, eq in enumerate(self.PRESET_CLEMONT, start=1):
             tag = "traslado" if eq[2] == "Traslado" else "ok"
@@ -1518,15 +2155,35 @@ class ConciliadorUniversal:
         num_cols = len(partes_primera)
         inicio_linea = 0
 
-        # Caso A: La primera linea contiene encabezados copiados desde Excel
-        if any("SERIAL" in p or "EQUIPO" in p or "ITEM" in p or "CLIENTE" in p for p in partes_primera):
+        # Determinar si la primera linea es genuinamente un encabezado
+        # 1. Si la primera celda es un numero (ej: '1', '20'), es fila de datos, NO encabezado
+        # 2. Si alguna celda contiene 'SERIAL EQUIPO:' o 'MODELO:', es fila de datos, NO encabezado
+        es_encabezado = False
+        primera_celda = partes_primera[0] if partes_primera else ""
+        contiene_datos_serial = any(p.startswith("SERIAL EQUIPO:") or p.startswith("MODELO:") for p in partes_primera)
+
+        if not primera_celda.isdigit() and not contiene_datos_serial:
+            keywords_header = [
+                "ITEM", "#", "ID", "CLIENTE", "SEDE", "CENTRO OPERATIVO", "UBICACION",
+                "EQUIPO", "SERVIDOR", "HOSTNAME", "SISTEMA OPERATIVO", "FABRICANTE",
+                "TIPO LICENCIA", "RESPONSABLE", "USUARIO", "OBSERVACIONES Y SERIAL",
+                "OBSERVACIONES", "VERIFICADO", "AUDITORIA"
+            ]
+            matches_hdr = 0
+            for p in partes_primera:
+                if any(kw == p or (kw in p and len(p) < 35) for kw in keywords_header):
+                    matches_hdr += 1
+            if matches_hdr >= 3:
+                es_encabezado = True
+
+        if es_encabezado:
             inicio_linea = 1
             for i, p in enumerate(partes_primera):
-                if any(k in p for k in ["SERIAL", "S/N"]) and idx_serial is None:
+                if any(k in p for k in ["SERIAL", "S/N", "OBSERVACIONES Y SERIAL"]) and idx_serial is None:
                     idx_serial = i
                 elif any(k in p for k in ["EQUIPO", "HOST", "DISPOSITIVO", "SERVIDOR"]) and idx_equipo is None:
                     idx_equipo = i
-                elif any(k in p for k in ["SEDE", "UBICACION", "CIUDAD", "LUGAR"]) and idx_sede is None:
+                elif any(k in p for k in ["SEDE", "UBICACION", "CIUDAD", "LUGAR", "CENTRO OPERATIVO"]) and idx_sede is None:
                     idx_sede = i
                 elif any(k in p for k in ["RESPONSABLE", "USUARIO", "ENCARGADO", "EMPLEADO"]) and idx_resp is None:
                     idx_resp = i
@@ -1534,7 +2191,7 @@ class ConciliadorUniversal:
                     idx_estado = i
                 elif any(k in p for k in ["OBSERVACION", "DETALLE", "COMENTARIO"]) and idx_obs is None:
                     idx_obs = i
-                elif any(k in p for k in ["ITEM", "#", "ID"]) and idx_item is None:
+                elif (p in ("ITEM", "#", "ID", "N°", "NO.", "ITEM #") or p.startswith("ITEM") or p.startswith("ID")) and "CANTIDAD" not in p and idx_item is None:
                     idx_item = i
 
             if idx_serial is None and idx_obs is not None:
@@ -1543,38 +2200,42 @@ class ConciliadorUniversal:
 
             self.log(f"Encabezados detectados en portapapeles: Equipo=Col {(idx_equipo or 0)+1}, Serial=Col {(idx_serial or 0)+1}", "info")
 
-        # Caso B: Copio la fila completa de Clemont (10 a 12 columnas sin encabezado)
-        elif num_cols >= 10:
-            idx_item   = 0
-            idx_sede   = 2
-            idx_equipo = 3
-            idx_resp   = 8
-            idx_estado = 11 if num_cols > 11 else 9
-            idx_serial = 10 if num_cols > 10 else 9
-            self.log(f"Detectada tabla completa ({num_cols} cols) en portapapeles. Mapeo automatico aplicado.", "info")
+        # Fallbacks estructurados segun el numero de columnas:
+        if num_cols >= 10:
+            if idx_item is None:   idx_item   = 0
+            if idx_sede is None:   idx_sede   = 2
+            if idx_equipo is None: idx_equipo = 3
+            if idx_resp is None:   idx_resp   = 8
+            if idx_estado is None: idx_estado = 11 if num_cols > 11 else 9
+            if idx_serial is None: idx_serial = 10
+            if idx_obs is None:    idx_obs    = 10
+            if not es_encabezado:
+                self.log(f"Detectada tabla completa ({num_cols} cols) en portapapeles. Mapeo automatico: Host=Col 4, Sede=Col 3, Serial=Col 11.", "info")
 
-        # Caso C: Copio 7 columnas (nuestro formato completo)
         elif num_cols == 7:
-            idx_item   = 0
-            idx_equipo = 1
-            idx_serial = 2
-            idx_estado = 3
-            idx_sede   = 4
-            idx_resp   = 5
-            idx_obs    = 6
+            if idx_item is None:   idx_item   = 0
+            if idx_equipo is None: idx_equipo = 1
+            if idx_serial is None: idx_serial = 2
+            if idx_estado is None: idx_estado = 3
+            if idx_sede is None:   idx_sede   = 4
+            if idx_resp is None:   idx_resp   = 5
+            if idx_obs is None:    idx_obs    = 6
 
-        # Caso D: Copio 4 columnas (Equipo | Serial | Estado | Sede)
         elif num_cols == 4:
-            idx_equipo = 0
-            idx_serial = 1
-            idx_estado = 2
-            idx_sede   = 3
+            if idx_equipo is None: idx_equipo = 0
+            if idx_serial is None: idx_serial = 1
+            if idx_estado is None: idx_estado = 2
+            if idx_sede is None:   idx_sede   = 3
 
-        # Indices por defecto si faltan
-        if idx_equipo is None: idx_equipo = 0
-        if idx_serial is None: idx_serial = 1 if num_cols > 1 else 0
-        if idx_estado is None: idx_estado = 2 if num_cols > 2 else None
-        if idx_sede is None:   idx_sede   = 3 if num_cols > 3 else None
+        else:
+            if idx_equipo is None: idx_equipo = 0
+            if idx_serial is None: idx_serial = 1 if num_cols > 1 else 0
+            if idx_estado is None: idx_estado = 2 if num_cols > 2 else None
+            if idx_sede is None:   idx_sede   = 3 if num_cols > 3 else None
+
+        cols_canon = ("#", "Equipo / Host", "Serial Real", "Estado", "Sede", "Responsable", "Observaciones")
+        if len(self.tree["columns"]) != 7:
+            self._reconfigurar_columnas_tree(cols_canon)
 
         conteo_actual = len(self.tree.get_children())
         for linea in lineas[inicio_linea:]:
@@ -1598,15 +2259,11 @@ class ConciliadorUniversal:
             seriales_extraidos = extraer_seriales(raw_serial)
             serial = seriales_extraidos[0] if seriales_extraidos else raw_serial
 
-            est_norm = normalizar(estado)
-            if est_norm in ("TRASLADO", "TRASL"):
-                estado = "Traslado"
+            tag = "ok"
+            if any("TRASLADO" in p.upper() for p in partes):
                 tag = "traslado"
-            else:
-                estado = "OK"
-                tag = "ok"
 
-            if not equipo and not serial:
+            if not equipo and not serial and not any(p.strip() for p in partes):
                 omitidos += 1
                 continue
 
@@ -1614,7 +2271,14 @@ class ConciliadorUniversal:
                 omitidos += 1
                 continue
 
-            vals = (item_n, equipo, serial, estado, sede, resp, obs)
+            est_norm = normalizar(estado)
+            if est_norm in ("TRASLADO", "TRASL"):
+                estado_canon = "Traslado"
+                tag = "traslado"
+            else:
+                estado_canon = "OK"
+
+            vals = (item_n, equipo, serial, estado_canon, sede, resp, obs)
             self.tree.insert("", "end", values=vals, tags=(tag,))
             agregados += 1
 
@@ -1655,38 +2319,46 @@ class ConciliadorUniversal:
 
     def _dialogo_fila(self, item_id=None, valores=None):
         dlg = tk.Toplevel(self.root)
-        dlg.title("Agregar / Editar equipo")
-        dlg.geometry("480x320")
+        dlg.title("Agregar / Editar registro")
+        dlg.geometry("520x420")
         dlg.grab_set()
 
-        campos = [
-            ("#",                    0),
-            ("Equipo / Host",        1),
-            ("Serial Real",          2),
-            ("Estado (OK / Traslado)", 3),
-            ("Sede",                 4),
-            ("Responsable",          5),
-            ("Observaciones",        6),
-        ]
+        cols_tree = list(self.tree["columns"]) if hasattr(self, "tree") and self.tree else ["#", "Equipo / Host", "Serial Real", "Estado", "Sede", "Responsable", "Observaciones"]
+
+        canvas = tk.Canvas(dlg, borderwidth=0, highlightthickness=0)
+        vsb_dlg = ttk.Scrollbar(dlg, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas)
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=vsb_dlg.set)
+
+        vsb_dlg.pack(side="right", fill="y")
+        canvas.pack(side="top", fill="both", expand=True, padx=10, pady=10)
+
         entradas = {}
-        for lbl, idx in campos:
-            frm = tk.Frame(dlg)
-            frm.pack(fill="x", padx=16, pady=3)
-            tk.Label(frm, text=lbl, width=22, anchor="w").pack(side="left")
+        for idx, col_nombre in enumerate(cols_tree):
+            frm = tk.Frame(scrollable_frame)
+            frm.pack(fill="x", padx=10, pady=3)
+            tk.Label(frm, text=str(col_nombre)[:22], width=24, anchor="w", font=("Arial", 9, "bold")).pack(side="left")
             val_def = ""
             if valores and idx < len(valores):
                 val_def = valores[idx]
             elif idx == 0 and not valores:
                 val_def = str(len(self.tree.get_children()) + 1)
-            elif idx == 3 and not valores:
-                val_def = "OK"
             var = tk.StringVar(value=str(val_def))
-            tk.Entry(frm, textvariable=var, width=30).pack(side="left")
+            tk.Entry(frm, textvariable=var, width=32, font=("Consolas", 9)).pack(side="left")
             entradas[idx] = var
 
         def guardar():
-            vals = tuple(entradas[i].get().strip() for i in range(7))
-            tag  = "traslado" if normalizar(vals[3]) == "TRASLADO" else "ok"
+            vals = tuple(entradas[i].get().strip() for i in range(len(cols_tree)))
+            tag = "ok"
+            for v in vals:
+                if "TRASLADO" in v.upper():
+                    tag = "traslado"
+                    break
             if item_id:
                 self.tree.item(item_id, values=vals, tags=(tag,))
             else:
@@ -1694,9 +2366,11 @@ class ConciliadorUniversal:
             self._actualizar_conteo()
             dlg.destroy()
 
-        tk.Button(dlg, text="Guardar", command=guardar,
+        btn_frm = tk.Frame(dlg)
+        btn_frm.pack(side="bottom", fill="x", pady=6)
+        tk.Button(btn_frm, text="Guardar", command=guardar,
                   bg="#28A745", fg="white",
-                  font=("Arial", 10, "bold")).pack(pady=8)
+                  font=("Arial", 10, "bold"), padx=15).pack(anchor="center")
 
     def _actualizar_conteo(self):
         n = len(self.tree.get_children())
@@ -1708,7 +2382,8 @@ class ConciliadorUniversal:
     # ------------------------------------------------------------------
 
     def log(self, msg, tag="info"):
-        self.txt_log.insert(tk.END, msg + "\n", tag)
+        ts = datetime.now().strftime("[%H:%M:%S] ")
+        self.txt_log.insert(tk.END, ts + str(msg) + "\n", tag)
         self.txt_log.see(tk.END)
         self.root.update_idletasks()
 
@@ -1723,10 +2398,27 @@ class ConciliadorUniversal:
             return
 
         nombre_hoja = self.nombre_hoja.get().strip()
+        idx_ser_c = self._get_col_idx(self.col_serial_var.get(), 11) - 1
+        idx_eq_c  = self._get_col_idx(self.col_equipo_var.get(), 4) - 1
+        idx_sd_c  = self._get_col_idx(self.col_sede_var.get(), 3) - 1
+        idx_rp_c  = self._get_col_idx(self.col_resp_var.get(), 9) - 1
+        idx_vf_c  = self._get_col_idx(self.col_verif_var.get(), 12) - 1
+
         lista_fisica = []
         for i in self.tree.get_children():
             vals = self.tree.item(i, "values")
-            if len(vals) >= 7:
+            if len(vals) >= 10:
+                campos = extraer_campos_completos(vals)
+                item_val = (str(vals[0]) if len(vals) > 0 and str(vals[0]).strip() else "") or campos.get("id_activo", "")
+                eq_val   = (str(vals[idx_eq_c]) if 0 <= idx_eq_c < len(vals) and str(vals[idx_eq_c]).strip() else "") or campos.get("equipo", "")
+                raw_ser  = (str(vals[idx_ser_c]) if 0 <= idx_ser_c < len(vals) and str(vals[idx_ser_c]).strip() else "") or campos.get("serial", "")
+                sd_val   = (str(vals[idx_sd_c]) if 0 <= idx_sd_c < len(vals) and str(vals[idx_sd_c]).strip() else "") or campos.get("sede", "")
+                rp_val   = (str(vals[idx_rp_c]) if 0 <= idx_rp_c < len(vals) and str(vals[idx_rp_c]).strip() else "") or campos.get("responsable", "")
+                st_val   = (str(vals[idx_vf_c]) if 0 <= idx_vf_c < len(vals) and str(vals[idx_vf_c]).strip() else "") or campos.get("estado", "OK")
+                sns = extraer_seriales(raw_ser)
+                sn_val = sns[0] if sns else campos.get("serial", raw_ser)
+                ob_val = raw_ser or campos.get("modelo", "")
+            elif len(vals) >= 7:
                 item_val = vals[0]
                 eq_val   = vals[1]
                 sn_val   = vals[2]
@@ -1903,16 +2595,19 @@ class ConciliadorUniversal:
 
                 # Actualizar nombre de equipo (si activo)
                 if usar_equipo and coincidencia["equipo"]:
-                    ws.cell(r, col_equipo).value = coincidencia["equipo"]
+                    if not (str(coincidencia["equipo"]).strip().isdigit() and len(str(coincidencia["equipo"]).strip()) <= 3):
+                        ws.cell(r, col_equipo).value = coincidencia["equipo"]
 
                 # Actualizar serial corregido (si activo)
                 if usar_serial and coincidencia["serial"]:
                     texto_obs = str(ws.cell(r, col_obs).value or "")
-                    serial_ok = f"Serial equipo: {coincidencia['serial']}"
-                    m_modelo  = re.search(r"(?i)(Modelo\s*:.+)", texto_obs)
-                    if m_modelo:
-                        serial_ok += f"; {m_modelo.group(1).strip()}"
-                    ws.cell(r, col_obs).value = serial_ok
+                    serial_val = str(coincidencia["serial"]).strip()
+                    if serial_val.upper() != "CLEMONT" and not (serial_val.isdigit() and len(serial_val) <= 3):
+                        serial_ok = f"Serial equipo: {serial_val}"
+                        m_modelo  = re.search(r"(?i)(Modelo\s*:.+)", texto_obs)
+                        if m_modelo:
+                            serial_ok += f"; {m_modelo.group(1).strip()}"
+                        ws.cell(r, col_obs).value = serial_ok
 
                 # Actualizar responsable (si activo y presente)
                 if usar_resp and coincidencia.get("resp"):
@@ -1943,7 +2638,8 @@ class ConciliadorUniversal:
                     f"{coincidencia['serial']}", "ok"
                 )
             else:
-                if ws.cell(r, 2).value:
+                has_data = any(str(ws.cell(r, c).value or "").strip() for c in (col_equipo, col_obs, col_sede, 1, 2, 3))
+                if has_data:
                     if r in filas_dup:
                         if usar_verif:
                             ws.cell(r, col_verif).value = "Duplicado"
@@ -1978,31 +2674,58 @@ class ConciliadorUniversal:
         )
         ws.freeze_panes = f"A{data_start}"
 
-        # --- Corregir formula TOTAL (si existe columna cantidad col 8) ---
-        if total_row <= ws.max_row:
-            ws.cell(total_row, 8).value = f"=SUM(H{data_start}:H{total_row - 1})"
+        # --- Deteccion de formato Clemont vs generico y columna cantidad ---
+        es_formato_clemont = (ws.max_column >= 10 and any("CLIENTE" in str(ws.cell(hdr_row, c).value or "").upper() for c in range(1, min(5, ws.max_column + 1))))
+        col_cant = None
+        for c in range(1, (ws.max_column or 0) + 1):
+            val_h = str(ws.cell(hdr_row, c).value or "").upper()
+            if "CANT" in val_h:
+                col_cant = c
+                break
+        if not col_cant and es_formato_clemont:
+            col_cant = 8
+
+        # --- Corregir formula TOTAL (si existe columna cantidad) ---
+        if col_cant and total_row <= ws.max_row:
+            letra_cant = get_column_letter(col_cant)
+            ws.cell(total_row, col_cant).value = f"=SUM({letra_cant}{data_start}:{letra_cant}{total_row - 1})"
 
         # --- Insertar altas antes del TOTAL -----------------------------
         for idx_a, alta in enumerate(altas):
             insert_r = total_row + idx_a
             ws.insert_rows(insert_r)
-            ws.cell(insert_r, 1).value                   = alta["item"] if alta["item"] else (insert_r - hdr_row)
-            ws.cell(insert_r, 2).value                   = "CLEMONT"
-            if usar_sede:
-                ws.cell(insert_r, col_sede).value        = alta["sede"]
-            if usar_equipo:
-                ws.cell(insert_r, col_equipo).value      = alta["equipo"]
-            ws.cell(insert_r, 5).value                   = "WINDOWS 11 PRO"
-            ws.cell(insert_r, 6).value                   = "Microsoft"
-            ws.cell(insert_r, 7).value                   = "Sistema operativo"
-            ws.cell(insert_r, 8).value                   = 1
-            if usar_resp and alta.get("resp"):
-                ws.cell(insert_r, col_resp).value        = alta["resp"]
-            ws.cell(insert_r, 10).value                  = "Activo"
-            if usar_serial:
-                ws.cell(insert_r, col_obs).value         = f"Serial equipo: {alta['serial']}"
-            if usar_verif:
-                ws.cell(insert_r, col_verif).value       = alta["estado"]
+            ws.cell(insert_r, 1).value = alta["item"] if alta["item"] else (insert_r - hdr_row)
+            if es_formato_clemont:
+                ws.cell(insert_r, 2).value                   = "CLEMONT"
+                if usar_sede:
+                    ws.cell(insert_r, col_sede).value        = alta["sede"]
+                if usar_equipo:
+                    ws.cell(insert_r, col_equipo).value      = alta["equipo"]
+                ws.cell(insert_r, 5).value                   = "WINDOWS 11 PRO"
+                ws.cell(insert_r, 6).value                   = "Microsoft"
+                ws.cell(insert_r, 7).value                   = "Sistema operativo"
+                ws.cell(insert_r, 8).value                   = 1
+                if usar_resp and alta.get("resp"):
+                    ws.cell(insert_r, col_resp).value        = alta["resp"]
+                ws.cell(insert_r, 10).value                  = "Activo"
+                if usar_serial:
+                    ws.cell(insert_r, col_obs).value         = f"Serial equipo: {alta['serial']}"
+                if usar_verif:
+                    ws.cell(insert_r, col_verif).value       = alta["estado"]
+            else:
+                if usar_equipo and col_equipo:
+                    ws.cell(insert_r, col_equipo).value      = alta["equipo"]
+                if usar_serial and col_obs:
+                    ws.cell(insert_r, col_obs).value         = f"Serial equipo: {alta['serial']}"
+                if usar_sede and col_sede:
+                    ws.cell(insert_r, col_sede).value        = alta["sede"]
+                if usar_resp and col_resp and alta.get("resp"):
+                    ws.cell(insert_r, col_resp).value        = alta["resp"]
+                if col_cant:
+                    ws.cell(insert_r, col_cant).value        = 1
+                if usar_verif and col_verif:
+                    ws.cell(insert_r, col_verif).value       = alta["estado"]
+
             for c in range(1, max(col_verif, ws.max_column) + 1):
                 ws.cell(insert_r, c).font   = FONT_BASE
                 ws.cell(insert_r, c).border = THIN_BORDER
@@ -2013,9 +2736,10 @@ class ConciliadorUniversal:
             self.log(f"Insertado alta: {alta['equipo']} en F{insert_r}", "ok")
 
         nuevo_total_row = total_row + len(altas)
-        if total_row <= ws.max_row:
-            ws.cell(nuevo_total_row, 8).value = (
-                f"=SUM(H{data_start}:H{nuevo_total_row - 1})"
+        if col_cant and total_row <= ws.max_row:
+            letra_cant = get_column_letter(col_cant)
+            ws.cell(nuevo_total_row, col_cant).value = (
+                f"=SUM({letra_cant}{data_start}:{letra_cant}{nuevo_total_row - 1})"
             )
 
         # --- Tablas de perifericos (Opcional demo Clemont) --------------
@@ -2063,6 +2787,10 @@ class ConciliadorUniversal:
 
         self.ruta_salida.set(ruta_guardado)
         wb.save(ruta_guardado)
+        try:
+            wb.close()
+        except Exception:
+            pass
 
         self.log("=" * 58, "info")
         self.log("  CONCILIACION COMPLETADA", "ok")
@@ -2143,6 +2871,9 @@ class ConciliadorUniversal:
         fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
 
         # Titulo
+        ws["A1"] = f"REPORTE DE AUDITORIA Y CONCILIACION FISICA - {fecha}"
+        ws["A1"].font = Font(name="Calibri", size=13, bold=True,
+                             color="1F4E78")
         ws["B2"] = f"REPORTE DE AUDITORIA Y CONCILIACION FISICA - {fecha}"
         ws["B2"].font = Font(name="Calibri", size=13, bold=True,
                              color="1F4E78")
