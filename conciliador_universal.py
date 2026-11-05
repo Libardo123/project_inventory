@@ -283,24 +283,34 @@ class ConciliadorUniversal:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Conciliador de Inventario Universal v3.1")
-        self.root.geometry("1040x840")
+        self.root.title("Conciliador de Inventario Universal v3.2")
+        self.root.geometry("1140x900")
         self.root.configure(bg="#F0F4F8")
         self.ruta_excel  = tk.StringVar()
+        self.ruta_salida = tk.StringVar()
         self.nombre_hoja = tk.StringVar()
         self.hojas_disponibles = []          # lista de hojas del Excel cargado
 
-        # Mapeo dinamico de columnas (Universal para cualquier cliente)
+        # Mapeo dinamico de columnas
         self.col_serial_var = tk.StringVar(value="Col K (11) - Observaciones y Serial")
         self.col_equipo_var = tk.StringVar(value="Col D (4) - Equipo/Servidor")
         self.col_sede_var   = tk.StringVar(value="Col C (3) - Sede")
+        self.col_resp_var   = tk.StringVar(value="Col I (9) - Responsable")
         self.col_verif_var  = tk.StringVar(value="Col L (12) - Verificado")
+
+        # Casillas de verificacion (chulos) para habilitar/deshabilitar columnas
+        self.chk_col_serial = tk.BooleanVar(value=True)
+        self.chk_col_equipo = tk.BooleanVar(value=True)
+        self.chk_col_sede   = tk.BooleanVar(value=True)
+        self.chk_col_resp   = tk.BooleanVar(value=True)
+        self.chk_col_verif  = tk.BooleanVar(value=True)
         self.chk_perifericos_clemont = tk.BooleanVar(value=True)
 
         # Configuracion de Modulo QR
         self.qr_fuente = tk.StringVar(value="auto")
         self.qr_empresa = tk.StringVar(value="CLEMONT")
         self.qr_formato = tk.StringVar(value="50x25mm")
+        self.qr_contenido_modo = tk.StringVar(value="completo")
         self.qr_scan_input = tk.StringVar()
         self._construir_gui()
 
@@ -312,15 +322,15 @@ class ConciliadorUniversal:
         # Titulo
         tk.Label(
             self.root,
-            text="  Conciliador de Inventario - Clemont  v3.0",
-            font=("Arial", 13, "bold"), bg="#1F4E78", fg="white", pady=10
+            text="  Conciliador de Inventario Universal  v3.2",
+            font=("Arial", 13, "bold"), bg="#1F4E78", fg="white", pady=8
         ).pack(fill="x")
 
         # ==============================================================
         # Notebook con pestanas
         # ==============================================================
         self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True, padx=10, pady=8)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=6)
 
         # -- Pestana 1: Conciliacion -----------------------------------
         tab1 = tk.Frame(self.notebook, bg="#F0F4F8")
@@ -338,25 +348,42 @@ class ConciliadorUniversal:
     # ------------------------------------------------------------------
 
     def _construir_tab_conciliacion(self, parent):
-        # --- Bloque 1: archivo -------------------------------------------
-        frm1 = tk.LabelFrame(parent, text="1. Archivo Excel",
-                              padx=10, pady=8, bg="#F0F4F8",
+        # --- Bloque 1: archivos de entrada y salida -----------------------
+        frm1 = tk.LabelFrame(parent, text="1. Archivos Excel (Origen y Destino)",
+                              padx=10, pady=6, bg="#F0F4F8",
                               font=("Arial", 10, "bold"))
-        frm1.pack(fill="x", padx=15, pady=(10, 2))
+        frm1.pack(fill="x", padx=15, pady=(6, 2))
 
-        tk.Entry(frm1, textvariable=self.ruta_excel, width=65,
+        # Fila 1: Archivo de entrada
+        f_in = tk.Frame(frm1, bg="#F0F4F8")
+        f_in.pack(fill="x", pady=2)
+        tk.Label(f_in, text="Archivo a auditar:", width=18, anchor="w",
+                 bg="#F0F4F8", font=("Arial", 9, "bold")).pack(side="left")
+        tk.Entry(f_in, textvariable=self.ruta_excel, width=60,
                  state="readonly", font=("Consolas", 9)).pack(
-            side="left", fill="x", expand=True, padx=(0, 8))
-        tk.Button(frm1, text="Examinar...", command=self._seleccionar_archivo,
+            side="left", fill="x", expand=True, padx=(0, 6))
+        tk.Button(f_in, text="Examinar...", command=self._seleccionar_archivo,
                   bg="#1F4E78", fg="white",
                   font=("Arial", 9, "bold")).pack(side="left")
 
+        # Fila 2: Archivo de salida configurable
+        f_out = tk.Frame(frm1, bg="#F0F4F8")
+        f_out.pack(fill="x", pady=2)
+        tk.Label(f_out, text="Guardar resultado en:", width=18, anchor="w",
+                 bg="#F0F4F8", font=("Arial", 9, "bold")).pack(side="left")
+        tk.Entry(f_out, textvariable=self.ruta_salida, width=60,
+                 font=("Consolas", 9)).pack(
+            side="left", fill="x", expand=True, padx=(0, 6))
+        tk.Button(f_out, text="Cambiar destino...", command=self._seleccionar_ruta_salida,
+                  bg="#6C757D", fg="white",
+                  font=("Arial", 9)).pack(side="left")
+
+        # Fila 3: Hoja a auditar
         frm1b = tk.Frame(parent, bg="#F0F4F8")
-        frm1b.pack(fill="x", padx=15, pady=(2, 6))
+        frm1b.pack(fill="x", padx=15, pady=(2, 4))
         tk.Label(frm1b, text="Hoja a auditar:",
                  bg="#F0F4F8", font=("Arial", 9, "bold")).pack(side="left")
 
-        # Dropdown (Combobox) — se llena automaticamente al cargar el Excel
         self.combo_hojas = ttk.Combobox(
             frm1b,
             textvariable=self.nombre_hoja,
@@ -368,59 +395,70 @@ class ConciliadorUniversal:
         self.combo_hojas.set("← Carga un Excel para ver las hojas disponibles")
         self.combo_hojas.bind("<<ComboboxSelected>>", self._on_hoja_seleccionada)
 
-        # Etiqueta de ayuda dinamica
         self.lbl_hoja_info = tk.Label(
             frm1b, text="", bg="#F0F4F8",
             font=("Arial", 8), fg="#555555"
         )
         self.lbl_hoja_info.pack(side="left", padx=4)
 
-        # --- Mapeo dinamico de columnas (Universal para cualquier cliente) --
+        # --- Mapeo dinamico de columnas con CASILLAS DE VERIFICACION (CHULOS) -
         frm1c = tk.Frame(parent, bg="#F0F4F8")
-        frm1c.pack(fill="x", padx=15, pady=(0, 6))
+        frm1c.pack(fill="x", padx=15, pady=(0, 4))
 
-        tk.Label(frm1c, text="Mapeo de Columnas:", bg="#F0F4F8",
+        tk.Label(frm1c, text="Mapeo Columnas:", bg="#F0F4F8",
                  font=("Arial", 9, "bold")).pack(side="left")
 
-        tk.Label(frm1c, text="Serial:", bg="#F0F4F8", font=("Arial", 8)).pack(side="left", padx=(8, 2))
-        self.combo_col_serial = ttk.Combobox(frm1c, textvariable=self.col_serial_var, width=17, font=("Consolas", 8))
-        self.combo_col_serial.pack(side="left")
+        # Serial con chulo
+        tk.Checkbutton(frm1c, text="Serial:", variable=self.chk_col_serial,
+                       command=self._actualizar_estado_combos, bg="#F0F4F8", font=("Arial", 8, "bold")).pack(side="left", padx=(4, 0))
+        self.combo_col_serial = ttk.Combobox(frm1c, textvariable=self.col_serial_var, width=15, font=("Consolas", 8))
+        self.combo_col_serial.pack(side="left", padx=(0, 4))
 
-        tk.Label(frm1c, text="Host/Equipo:", bg="#F0F4F8", font=("Arial", 8)).pack(side="left", padx=(8, 2))
-        self.combo_col_equipo = ttk.Combobox(frm1c, textvariable=self.col_equipo_var, width=17, font=("Consolas", 8))
-        self.combo_col_equipo.pack(side="left")
+        # Host con chulo
+        tk.Checkbutton(frm1c, text="Host/Equipo:", variable=self.chk_col_equipo,
+                       command=self._actualizar_estado_combos, bg="#F0F4F8", font=("Arial", 8, "bold")).pack(side="left", padx=(4, 0))
+        self.combo_col_equipo = ttk.Combobox(frm1c, textvariable=self.col_equipo_var, width=15, font=("Consolas", 8))
+        self.combo_col_equipo.pack(side="left", padx=(0, 4))
 
-        tk.Label(frm1c, text="Sede:", bg="#F0F4F8", font=("Arial", 8)).pack(side="left", padx=(8, 2))
-        self.combo_col_sede = ttk.Combobox(frm1c, textvariable=self.col_sede_var, width=14, font=("Consolas", 8))
-        self.combo_col_sede.pack(side="left")
+        # Sede con chulo
+        tk.Checkbutton(frm1c, text="Sede:", variable=self.chk_col_sede,
+                       command=self._actualizar_estado_combos, bg="#F0F4F8", font=("Arial", 8, "bold")).pack(side="left", padx=(4, 0))
+        self.combo_col_sede = ttk.Combobox(frm1c, textvariable=self.col_sede_var, width=12, font=("Consolas", 8))
+        self.combo_col_sede.pack(side="left", padx=(0, 4))
 
-        tk.Label(frm1c, text="Resultado:", bg="#F0F4F8", font=("Arial", 8)).pack(side="left", padx=(8, 2))
-        self.combo_col_verif = ttk.Combobox(frm1c, textvariable=self.col_verif_var, width=15, font=("Consolas", 8))
-        self.combo_col_verif.pack(side="left")
+        # Responsable con chulo
+        tk.Checkbutton(frm1c, text="Responsable:", variable=self.chk_col_resp,
+                       command=self._actualizar_estado_combos, bg="#F0F4F8", font=("Arial", 8, "bold")).pack(side="left", padx=(4, 0))
+        self.combo_col_resp = ttk.Combobox(frm1c, textvariable=self.col_resp_var, width=14, font=("Consolas", 8))
+        self.combo_col_resp.pack(side="left", padx=(0, 4))
 
-        tk.Checkbutton(frm1c, text="Anexar Tablets/Monitores Clemont",
+        # Resultado / Auditoria con chulo
+        tk.Checkbutton(frm1c, text="Auditoría:", variable=self.chk_col_verif,
+                       command=self._actualizar_estado_combos, bg="#F0F4F8", font=("Arial", 8, "bold")).pack(side="left", padx=(4, 0))
+        self.combo_col_verif = ttk.Combobox(frm1c, textvariable=self.col_verif_var, width=14, font=("Consolas", 8))
+        self.combo_col_verif.pack(side="left", padx=(0, 4))
+
+        tk.Checkbutton(frm1c, text="Anexar Tablets/Monitores",
                        variable=self.chk_perifericos_clemont,
                        bg="#F0F4F8", font=("Arial", 8)).pack(side="right")
 
-        # --- Bloque 2: tabla de equipos verificados ----------------------
+        # --- Bloque 2: tabla de equipos verificados (7 columnas completas) -
         frm2 = tk.LabelFrame(
             parent,
-            text="2. Lista de Equipos Verificados Fisicamente  "
-                 "(Equipo | Serial Real | Estado | Sede)",
-            padx=10, pady=6, bg="#F0F4F8", font=("Arial", 10, "bold")
+            text="2. Lista de Equipos Verificados Fisicamente  (# | Equipo | Serial | Estado | Sede | Responsable | Observaciones)",
+            padx=10, pady=4, bg="#F0F4F8", font=("Arial", 10, "bold")
         )
         frm2.pack(fill="both", expand=True, padx=15, pady=2)
 
         # Instruccion de pegado
         instruccion = (
-            "Como pegar desde Excel:  Selecciona el rango en tu hoja de "
-            "verificacion (4 columnas: Equipo, Serial, Estado, Sede)  -->  "
-            "Ctrl+C  -->  Haz clic en 'PEGAR DESDE EXCEL'"
+            "Pegado Inteligente: Puedes copiar cualquier tabla desde Excel (4 columnas o la tabla completa de 12 columnas). "
+            "El sistema detecta automaticamente las columnas correspondientes."
         )
         tk.Label(frm2, text=instruccion, bg="#FFF3CD", fg="#856404",
-                 font=("Arial", 8), wraplength=950,
+                 font=("Arial", 8), wraplength=1050,
                  justify="left", relief="solid", bd=1,
-                 padx=6, pady=4).pack(fill="x", pady=(0, 6))
+                 padx=6, pady=3).pack(fill="x", pady=(0, 4))
 
         # Barra de botones
         btn_bar = tk.Frame(frm2, bg="#F0F4F8")
@@ -429,7 +467,7 @@ class ConciliadorUniversal:
         tk.Button(btn_bar, text="PEGAR DESDE EXCEL  (Ctrl+V)",
                   command=self._pegar_desde_portapapeles,
                   bg="#28A745", fg="white",
-                  font=("Arial", 10, "bold")).pack(side="left", padx=(0, 6))
+                  font=("Arial", 9, "bold")).pack(side="left", padx=(0, 6))
         tk.Button(btn_bar, text="Cargar Preset Clemont",
                   command=self._cargar_preset_clemont,
                   bg="#007BFF", fg="white",
@@ -452,15 +490,18 @@ class ConciliadorUniversal:
                                    font=("Arial", 9, "bold"))
         self.lbl_conteo.pack(side="right", padx=8)
 
-        # Tabla Treeview
-        cols = ("Equipo / Host", "Serial Real", "Estado", "Sede")
-        self.tree = ttk.Treeview(frm2, columns=cols, show="headings", height=10)
+        # Tabla Treeview ampliada a 7 columnas
+        cols = ("#", "Equipo / Host", "Serial Real", "Estado", "Sede", "Responsable", "Observaciones")
+        self.tree = ttk.Treeview(frm2, columns=cols, show="headings", height=8)
         for c in cols:
             self.tree.heading(c, text=c)
-        self.tree.column("Equipo / Host", width=220)
-        self.tree.column("Serial Real",   width=200)
-        self.tree.column("Estado",        width=100)
-        self.tree.column("Sede",          width=210)
+        self.tree.column("#",             width=45,  anchor="center")
+        self.tree.column("Equipo / Host", width=170)
+        self.tree.column("Serial Real",   width=160)
+        self.tree.column("Estado",        width=85,  anchor="center")
+        self.tree.column("Sede",          width=135)
+        self.tree.column("Responsable",   width=135)
+        self.tree.column("Observaciones", width=175)
 
         # Colores por estado en la tabla
         self.tree.tag_configure("ok",       background="#E2EFDA")
@@ -475,26 +516,51 @@ class ConciliadorUniversal:
         # Atajo Ctrl+V en la ventana principal
         self.root.bind("<Control-v>", lambda e: self._pegar_desde_portapapeles())
 
-        # --- Bloque 3: boton ejecutar ------------------------------------
-        frm3 = tk.Frame(parent, bg="#F0F4F8", pady=6)
+        # --- Bloque 3: botones de ejecucion y apertura directa -----------
+        frm3 = tk.Frame(parent, bg="#F0F4F8", pady=4)
         frm3.pack(fill="x", padx=15)
+
         tk.Button(
             frm3,
             text="EJECUTAR CONCILIACION COMPLETA",
             command=self._ejecutar,
             bg="#28A745", fg="white",
-            font=("Arial", 12, "bold"), pady=10
-        ).pack(fill="x")
+            font=("Arial", 11, "bold"), pady=6
+        ).pack(side="left", fill="x", expand=True, padx=(0, 8))
 
-        # --- Bloque 4: bitacora ------------------------------------------
-        frm4 = tk.LabelFrame(parent, text="3. Bitacora",
-                              padx=10, pady=6, bg="#F0F4F8",
+        self.btn_abrir_excel = tk.Button(
+            frm3,
+            text=" Abrir Excel Auditado ",
+            command=self._abrir_excel_resultado,
+            bg="#007BFF", fg="white",
+            font=("Arial", 9, "bold"), pady=6
+        )
+        self.btn_abrir_excel.pack(side="left", padx=(0, 6))
+
+        self.btn_abrir_carpeta = tk.Button(
+            frm3,
+            text=" Abrir Carpeta ",
+            command=self._abrir_carpeta_resultado,
+            bg="#6C757D", fg="white",
+            font=("Arial", 9), pady=6
+        )
+        self.btn_abrir_carpeta.pack(side="left")
+
+        # --- Bloque 4: bitacora de auditoria ampliada con scrollbar -------
+        frm4 = tk.LabelFrame(parent, text="3. Bitacora de Auditoria",
+                              padx=10, pady=4, bg="#F0F4F8",
                               font=("Arial", 10, "bold"))
-        frm4.pack(fill="both", expand=True, padx=15, pady=(2, 10))
+        frm4.pack(fill="both", expand=True, padx=15, pady=(2, 8))
 
+        vsb_log = ttk.Scrollbar(frm4, orient="vertical")
         self.txt_log = tk.Text(frm4, bg="#1E1E1E", fg="#D4D4D4",
-                               font=("Consolas", 9), height=8)
-        self.txt_log.pack(fill="both", expand=True)
+                               font=("Consolas", 10), height=14,
+                               yscrollcommand=vsb_log.set)
+        vsb_log.config(command=self.txt_log.yview)
+
+        self.txt_log.pack(side="left", fill="both", expand=True)
+        vsb_log.pack(side="right", fill="y")
+
         self.txt_log.tag_config("ok",    foreground="#6BCF6B")
         self.txt_log.tag_config("warn",  foreground="#FFD700")
         self.txt_log.tag_config("error", foreground="#FF6B6B")
@@ -579,6 +645,17 @@ class ConciliadorUniversal:
             tk.Radiobutton(frm_fmt, text=texto, variable=self.qr_formato,
                            value=valor, bg=COLOR_BG,
                            font=("Arial", 9)).pack(anchor="w")
+
+        f_tipo_qr = tk.Frame(frm_fmt, bg=COLOR_BG)
+        f_tipo_qr.pack(fill="x", pady=(4, 0))
+        tk.Label(f_tipo_qr, text="Contenido dentro del QR:", bg=COLOR_BG,
+                 font=("Arial", 8, "bold"), fg="#1F4E78").pack(anchor="w")
+        tk.Radiobutton(f_tipo_qr, text="Ficha completa (Celular ve: ID, Equipo, Serial, Sede)",
+                       variable=self.qr_contenido_modo, value="completo", bg=COLOR_BG,
+                       font=("Arial", 8)).pack(anchor="w")
+        tk.Radiobutton(f_tipo_qr, text="Solo ID de activo (Ideal para pistola lectora en Excel)",
+                       variable=self.qr_contenido_modo, value="solo_id", bg=COLOR_BG,
+                       font=("Arial", 8)).pack(anchor="w")
 
         # ---- Seccion 3: Acciones principales -----------------------------
         frm_acc = tk.LabelFrame(parent, text="3. Acciones de Generacion y Exportacion",
@@ -712,10 +789,16 @@ class ConciliadorUniversal:
             contadores = {}
             for item_id in items_tree:
                 vals = self.tree.item(item_id)["values"]
-                nom_eq = str(vals[0] if len(vals) > 0 else "")
-                serial = str(vals[1] if len(vals) > 1 else "")
-                estado = str(vals[2] if len(vals) > 2 else "OK")
-                sede   = str(vals[3] if len(vals) > 3 else "")
+                if len(vals) >= 7:
+                    nom_eq = str(vals[1] if len(vals) > 1 else "")
+                    serial = str(vals[2] if len(vals) > 2 else "")
+                    estado = str(vals[3] if len(vals) > 3 else "OK")
+                    sede   = str(vals[4] if len(vals) > 4 else "")
+                else:
+                    nom_eq = str(vals[0] if len(vals) > 0 else "")
+                    serial = str(vals[1] if len(vals) > 1 else "")
+                    estado = str(vals[2] if len(vals) > 2 else "OK")
+                    sede   = str(vals[3] if len(vals) > 3 else "")
 
                 nom_up = nom_eq.upper()
                 if any(k in nom_up for k in ["MONITOR", "PANTALLA", "LG 27", "VIEWSONIC", "SAMSUNG", "JANUS"]):
@@ -830,13 +913,25 @@ class ConciliadorUniversal:
         img = Image.new("RGB", (w, h), "white")
         draw = ImageDraw.Draw(img)
 
-        # Generar QR — SOLO contiene el ID del activo
+        empresa = self.qr_empresa.get().strip().upper() if hasattr(self, "qr_empresa") and self.qr_empresa.get() else "CLEMONT"
+
+        # Generar QR — Ficha completa (para celular) o Solo ID (para pistola lectora)
         qr = qrcode.QRCode(
             box_size=10,
             border=1,
             error_correction=qrcode.constants.ERROR_CORRECT_M
         )
-        qr.add_data(item["id"])
+        if getattr(self, "qr_contenido_modo", None) and self.qr_contenido_modo.get() == "solo_id":
+            qr_data = item["id"]
+        else:
+            qr_data = (
+                f"ACTIVO: {item['id']}\n"
+                f"EQUIPO: {item['equipo']}\n"
+                f"SERIAL: {item['serial']}\n"
+                f"SEDE: {item['sede']}\n"
+                f"EMPRESA: {empresa}"
+            )
+        qr.add_data(qr_data)
         qr.make(fit=True)
         qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
         qr_img = qr_img.resize((qr_dim, qr_dim), Image.Resampling.LANCZOS)
@@ -1121,9 +1216,14 @@ class ConciliadorUniversal:
         encontrado = None
 
         for eq in equipos:
-            if (eq["id"].upper() == termino or
-                normalizar(eq["serial"]) == normalizar(termino) or
-                eq["equipo"].upper() == termino):
+            eq_id = eq["id"].upper()
+            eq_sn = normalizar(eq["serial"])
+            eq_nom = eq["equipo"].upper()
+            term_norm = normalizar(termino)
+
+            if (eq_id == termino or eq_id in termino or
+                (eq_sn and (eq_sn == term_norm or eq_sn in term_norm)) or
+                (eq_nom and (eq_nom == termino or eq_nom in termino))):
                 encontrado = eq
                 break
 
@@ -1159,7 +1259,53 @@ class ConciliadorUniversal:
         )
         if ruta:
             self.ruta_excel.set(ruta)
+            dir_s, nom_s = os.path.split(ruta)
+            nom_out = "AUDITADO_" + nom_s if not nom_s.startswith("AUDITADO_") else nom_s
+            self.ruta_salida.set(os.path.join(dir_s, nom_out))
             self._cargar_hojas_en_combo()
+
+    def _seleccionar_ruta_salida(self):
+        ruta_sug = self.ruta_salida.get() or "AUDITADO_Inventario.xlsx"
+        dir_s, nom_s = os.path.split(ruta_sug)
+        nueva = filedialog.asksaveasfilename(
+            title="Seleccionar dónde guardar el archivo auditado",
+            initialdir=dir_s or os.getcwd(),
+            initialfile=nom_s or "AUDITADO_Inventario.xlsx",
+            defaultextension=".xlsx",
+            filetypes=[("Archivos Excel", "*.xlsx")]
+        )
+        if nueva:
+            self.ruta_salida.set(nueva)
+            self.log(f"Ruta de guardado configurada en: {nueva}", "info")
+
+    def _abrir_excel_resultado(self):
+        ruta = self.ruta_salida.get().strip()
+        if not ruta or not os.path.exists(ruta):
+            messagebox.showinfo("Aviso", "Primero ejecuta la conciliacion para generar el archivo auditado.")
+            return
+        try:
+            os.startfile(ruta)
+        except Exception:
+            subprocess.Popen(["start", "", ruta], shell=True)
+
+    def _abrir_carpeta_resultado(self):
+        ruta = self.ruta_salida.get().strip()
+        carpeta = os.path.dirname(ruta) if ruta else os.getcwd()
+        if not os.path.exists(carpeta):
+            carpeta = os.getcwd()
+        try:
+            os.startfile(carpeta)
+        except Exception:
+            subprocess.Popen(["explorer", carpeta])
+
+    def _actualizar_estado_combos(self):
+        """Habilita o deshabilita los dropdowns segun las casillas de verificacion (chulos)."""
+        if hasattr(self, "combo_col_serial"):
+            self.combo_col_serial.config(state="readonly" if self.chk_col_serial.get() else "disabled")
+            self.combo_col_equipo.config(state="readonly" if self.chk_col_equipo.get() else "disabled")
+            self.combo_col_sede.config(state="readonly" if self.chk_col_sede.get() else "disabled")
+            self.combo_col_resp.config(state="readonly" if self.chk_col_resp.get() else "disabled")
+            self.combo_col_verif.config(state="readonly" if self.chk_col_verif.get() else "disabled")
 
     def _cargar_hojas_en_combo(self):
         """Lee las hojas del Excel y llena el dropdown automaticamente."""
@@ -1236,6 +1382,7 @@ class ConciliadorUniversal:
             col_serial_det = None
             col_equipo_det = None
             col_sede_det = None
+            col_resp_det = None
             col_verif_det = None
 
             for c in range(1, max_c + 1):
@@ -1252,22 +1399,37 @@ class ConciliadorUniversal:
                     col_equipo_det = etiqueta
                 if not col_sede_det and any(k in val_up for k in ["SEDE", "UBICACION", "CIUDAD", "LUGAR"]):
                     col_sede_det = etiqueta
-                if not col_verif_det and any(k in val_up for k in ["VERIFICADO", "ESTADO", "AUDITORIA", "CHECK"]):
+                if not col_resp_det and any(k in val_up for k in ["RESPONSABLE", "USUARIO", "ENCARGADO", "EMPLEADO", "ASIGNADO"]):
+                    col_resp_det = etiqueta
+                # Priorizar VERIFICADO o AUDITORIA para no confundir con columna "Estado" (Activo/Inactivo)
+                if not col_verif_det and any(k in val_up for k in ["VERIFICADO", "AUDITORIA", "CHECK"]):
                     col_verif_det = etiqueta
+
+            # Fallback para resultado si no habia columna "Verificado"
+            if not col_verif_det:
+                for c in range(1, max_c + 1):
+                    val = str(ws.cell(fila_hdr, c).value or "").strip().upper()
+                    if "ESTADO" in val:
+                        letra = openpyxl.utils.get_column_letter(c)
+                        col_verif_det = f"Col {letra} ({c}) - {val[:20]}"
+                        break
 
             wb.close()
 
             # Poblar los dropdowns
-            for combo in (self.combo_col_serial, self.combo_col_equipo, self.combo_col_sede, self.combo_col_verif):
+            for combo in (self.combo_col_serial, self.combo_col_equipo, self.combo_col_sede, self.combo_col_resp, self.combo_col_verif):
                 combo["values"] = opciones_cols
 
             if col_serial_det: self.col_serial_var.set(col_serial_det)
             if col_equipo_det: self.col_equipo_var.set(col_equipo_det)
             if col_sede_det:   self.col_sede_var.set(col_sede_det)
+            if col_resp_det:   self.col_resp_var.set(col_resp_det)
             if col_verif_det:  self.col_verif_var.set(col_verif_det)
 
+            self._actualizar_estado_combos()
+
             self.log(f"Encabezados detectados en Fila {fila_hdr} de [{hoja}]:", "info")
-            self.log(f"   Serial: [{self.col_serial_var.get()}] | Host: [{self.col_equipo_var.get()}] | Sede: [{self.col_sede_var.get()}] | Auditoria: [{self.col_verif_var.get()}]", "ok")
+            self.log(f"   Serial: [{self.col_serial_var.get()}] | Host: [{self.col_equipo_var.get()}] | Sede: [{self.col_sede_var.get()}] | Resp: [{self.col_resp_var.get()}] | Auditoria: [{self.col_verif_var.get()}]", "ok")
 
         except Exception as e:
             self.log(f"Aviso al detectar columnas: {e}", "warn")
@@ -1312,18 +1474,20 @@ class ConciliadorUniversal:
     def _cargar_preset_clemont(self):
         """Carga la lista de equipos verificados en auditoria fisica de Clemont."""
         self._limpiar_tabla()
-        for eq in self.PRESET_CLEMONT:
+        for i, eq in enumerate(self.PRESET_CLEMONT, start=1):
             tag = "traslado" if eq[2] == "Traslado" else "ok"
-            self.tree.insert("", "end", values=eq, tags=(tag,))
+            vals = (i, eq[0], eq[1], eq[2], eq[3], "Asignado", "")
+            self.tree.insert("", "end", values=vals, tags=(tag,))
         self._actualizar_conteo()
         self.log(f"Preset Clemont cargado ({len(self.PRESET_CLEMONT)} equipos verificados).", "info")
 
     def _pegar_desde_portapapeles(self):
         """
         Lee el contenido del portapapeles (texto TSV que copia Excel)
-        y lo agrega a la tabla. Formato esperado de cada fila:
-            Equipo <TAB> Serial <TAB> Estado <TAB> Sede
-        Si el usuario pega filas con mas o menos columnas se hace lo posible.
+        y lo agrega a la tabla Treeview de 7 columnas:
+            # | Equipo | Serial | Estado | Sede | Responsable | Observaciones
+        Detecta inteligentemente si se copio una tabla de 4 columnas, de 7 columnas,
+        o la tabla completa de 10-12 columnas de inventario.
         """
         try:
             raw = self.root.clipboard_get()
@@ -1336,28 +1500,104 @@ class ConciliadorUniversal:
             return
 
         lineas = raw.strip().splitlines()
+        if not lineas:
+            return
+
         agregados = 0
         omitidos  = 0
 
-        for linea in lineas:
+        idx_item   = None
+        idx_equipo = None
+        idx_serial = None
+        idx_estado = None
+        idx_sede   = None
+        idx_resp   = None
+        idx_obs    = None
+
+        partes_primera = [p.strip().upper() for p in lineas[0].split("\t")]
+        num_cols = len(partes_primera)
+        inicio_linea = 0
+
+        # Caso A: La primera linea contiene encabezados copiados desde Excel
+        if any("SERIAL" in p or "EQUIPO" in p or "ITEM" in p or "CLIENTE" in p for p in partes_primera):
+            inicio_linea = 1
+            for i, p in enumerate(partes_primera):
+                if any(k in p for k in ["SERIAL", "S/N"]) and idx_serial is None:
+                    idx_serial = i
+                elif any(k in p for k in ["EQUIPO", "HOST", "DISPOSITIVO", "SERVIDOR"]) and idx_equipo is None:
+                    idx_equipo = i
+                elif any(k in p for k in ["SEDE", "UBICACION", "CIUDAD", "LUGAR"]) and idx_sede is None:
+                    idx_sede = i
+                elif any(k in p for k in ["RESPONSABLE", "USUARIO", "ENCARGADO", "EMPLEADO"]) and idx_resp is None:
+                    idx_resp = i
+                elif any(k in p for k in ["VERIFICADO", "AUDITORIA", "ESTADO"]) and idx_estado is None:
+                    idx_estado = i
+                elif any(k in p for k in ["OBSERVACION", "DETALLE", "COMENTARIO"]) and idx_obs is None:
+                    idx_obs = i
+                elif any(k in p for k in ["ITEM", "#", "ID"]) and idx_item is None:
+                    idx_item = i
+
+            if idx_serial is None and idx_obs is not None:
+                idx_serial = idx_obs
+                idx_obs = None
+
+            self.log(f"Encabezados detectados en portapapeles: Equipo=Col {(idx_equipo or 0)+1}, Serial=Col {(idx_serial or 0)+1}", "info")
+
+        # Caso B: Copio la fila completa de Clemont (10 a 12 columnas sin encabezado)
+        elif num_cols >= 10:
+            idx_item   = 0
+            idx_sede   = 2
+            idx_equipo = 3
+            idx_resp   = 8
+            idx_estado = 11 if num_cols > 11 else 9
+            idx_serial = 10 if num_cols > 10 else 9
+            self.log(f"Detectada tabla completa ({num_cols} cols) en portapapeles. Mapeo automatico aplicado.", "info")
+
+        # Caso C: Copio 7 columnas (nuestro formato completo)
+        elif num_cols == 7:
+            idx_item   = 0
+            idx_equipo = 1
+            idx_serial = 2
+            idx_estado = 3
+            idx_sede   = 4
+            idx_resp   = 5
+            idx_obs    = 6
+
+        # Caso D: Copio 4 columnas (Equipo | Serial | Estado | Sede)
+        elif num_cols == 4:
+            idx_equipo = 0
+            idx_serial = 1
+            idx_estado = 2
+            idx_sede   = 3
+
+        # Indices por defecto si faltan
+        if idx_equipo is None: idx_equipo = 0
+        if idx_serial is None: idx_serial = 1 if num_cols > 1 else 0
+        if idx_estado is None: idx_estado = 2 if num_cols > 2 else None
+        if idx_sede is None:   idx_sede   = 3 if num_cols > 3 else None
+
+        conteo_actual = len(self.tree.get_children())
+        for linea in lineas[inicio_linea:]:
             linea = linea.strip()
             if not linea:
                 continue
 
-            # Excel separa columnas con TAB
             partes = linea.split("\t")
-
-            # Necesitamos al menos Equipo y Serial (cols 0 y 1)
-            if len(partes) < 2:
+            if len(partes) < 2 and num_cols > 1:
                 omitidos += 1
                 continue
 
-            equipo = partes[0].strip() if len(partes) > 0 else ""
-            serial = partes[1].strip() if len(partes) > 1 else ""
-            estado = partes[2].strip() if len(partes) > 2 else "OK"
-            sede   = partes[3].strip() if len(partes) > 3 else ""
+            equipo = partes[idx_equipo].strip() if idx_equipo is not None and len(partes) > idx_equipo else ""
+            raw_serial = partes[idx_serial].strip() if idx_serial is not None and len(partes) > idx_serial else ""
+            estado = partes[idx_estado].strip() if idx_estado is not None and len(partes) > idx_estado else "OK"
+            sede   = partes[idx_sede].strip() if idx_sede is not None and len(partes) > idx_sede else ""
+            resp   = partes[idx_resp].strip() if idx_resp is not None and len(partes) > idx_resp else ""
+            obs    = partes[idx_obs].strip() if idx_obs is not None and len(partes) > idx_obs else ""
+            item_n = partes[idx_item].strip() if idx_item is not None and len(partes) > idx_item else str(conteo_actual + agregados + 1)
 
-            # Normalizar estado
+            seriales_extraidos = extraer_seriales(raw_serial)
+            serial = seriales_extraidos[0] if seriales_extraidos else raw_serial
+
             est_norm = normalizar(estado)
             if est_norm in ("TRASLADO", "TRASL"):
                 estado = "Traslado"
@@ -1370,8 +1610,12 @@ class ConciliadorUniversal:
                 omitidos += 1
                 continue
 
-            self.tree.insert("", "end", values=(equipo, serial, estado, sede),
-                             tags=(tag,))
+            if normalizar(equipo) in ("ITEM", "EQUIPO", "EQUIPOSERVIDOR"):
+                omitidos += 1
+                continue
+
+            vals = (item_n, equipo, serial, estado, sede, resp, obs)
+            self.tree.insert("", "end", values=vals, tags=(tag,))
             agregados += 1
 
         self._actualizar_conteo()
@@ -1385,8 +1629,7 @@ class ConciliadorUniversal:
             messagebox.showwarning(
                 "Sin datos validos",
                 "No se encontraron filas validas en el portapapeles.\n\n"
-                "Asegurate de copiar exactamente 4 columnas desde Excel:\n"
-                "  Equipo | Serial | Estado | Sede"
+                "Asegurate de copiar los datos en Excel (Ctrl+C) antes de pegar."
             )
 
     # ------ CRUD de la tabla ---------------------------------------------
@@ -1413,27 +1656,37 @@ class ConciliadorUniversal:
     def _dialogo_fila(self, item_id=None, valores=None):
         dlg = tk.Toplevel(self.root)
         dlg.title("Agregar / Editar equipo")
-        dlg.geometry("440x230")
+        dlg.geometry("480x320")
         dlg.grab_set()
 
         campos = [
-            ("Equipo / Host",        0),
-            ("Serial Real",          1),
-            ("Estado (OK / Traslado)", 2),
-            ("Sede",                 3),
+            ("#",                    0),
+            ("Equipo / Host",        1),
+            ("Serial Real",          2),
+            ("Estado (OK / Traslado)", 3),
+            ("Sede",                 4),
+            ("Responsable",          5),
+            ("Observaciones",        6),
         ]
         entradas = {}
         for lbl, idx in campos:
             frm = tk.Frame(dlg)
-            frm.pack(fill="x", padx=16, pady=5)
-            tk.Label(frm, text=lbl, width=24, anchor="w").pack(side="left")
-            var = tk.StringVar(value=(valores[idx] if valores else ""))
-            tk.Entry(frm, textvariable=var, width=28).pack(side="left")
+            frm.pack(fill="x", padx=16, pady=3)
+            tk.Label(frm, text=lbl, width=22, anchor="w").pack(side="left")
+            val_def = ""
+            if valores and idx < len(valores):
+                val_def = valores[idx]
+            elif idx == 0 and not valores:
+                val_def = str(len(self.tree.get_children()) + 1)
+            elif idx == 3 and not valores:
+                val_def = "OK"
+            var = tk.StringVar(value=str(val_def))
+            tk.Entry(frm, textvariable=var, width=30).pack(side="left")
             entradas[idx] = var
 
         def guardar():
-            vals = tuple(entradas[i].get().strip() for i in range(4))
-            tag  = "traslado" if normalizar(vals[2]) == "TRASLADO" else "ok"
+            vals = tuple(entradas[i].get().strip() for i in range(7))
+            tag  = "traslado" if normalizar(vals[3]) == "TRASLADO" else "ok"
             if item_id:
                 self.tree.item(item_id, values=vals, tags=(tag,))
             else:
@@ -1443,7 +1696,7 @@ class ConciliadorUniversal:
 
         tk.Button(dlg, text="Guardar", command=guardar,
                   bg="#28A745", fg="white",
-                  font=("Arial", 10, "bold")).pack(pady=10)
+                  font=("Arial", 10, "bold")).pack(pady=8)
 
     def _actualizar_conteo(self):
         n = len(self.tree.get_children())
@@ -1470,15 +1723,43 @@ class ConciliadorUniversal:
             return
 
         nombre_hoja = self.nombre_hoja.get().strip()
-        lista_fisica = [
-            {
-                "equipo": self.tree.item(i, "values")[0],
-                "serial": self.tree.item(i, "values")[1],
-                "estado": self.tree.item(i, "values")[2],
-                "sede":   self.tree.item(i, "values")[3],
-            }
-            for i in self.tree.get_children()
-        ]
+        lista_fisica = []
+        for i in self.tree.get_children():
+            vals = self.tree.item(i, "values")
+            if len(vals) >= 7:
+                item_val = vals[0]
+                eq_val   = vals[1]
+                sn_val   = vals[2]
+                st_val   = vals[3]
+                sd_val   = vals[4]
+                rp_val   = vals[5]
+                ob_val   = vals[6]
+            elif len(vals) == 4:
+                item_val = ""
+                eq_val   = vals[0]
+                sn_val   = vals[1]
+                st_val   = vals[2]
+                sd_val   = vals[3]
+                rp_val   = ""
+                ob_val   = ""
+            else:
+                item_val = vals[0] if len(vals) > 0 else ""
+                eq_val   = vals[1] if len(vals) > 1 else ""
+                sn_val   = vals[2] if len(vals) > 2 else ""
+                st_val   = vals[3] if len(vals) > 3 else "OK"
+                sd_val   = vals[4] if len(vals) > 4 else ""
+                rp_val   = vals[5] if len(vals) > 5 else ""
+                ob_val   = vals[6] if len(vals) > 6 else ""
+
+            lista_fisica.append({
+                "item":   item_val,
+                "equipo": eq_val,
+                "serial": sn_val,
+                "estado": st_val,
+                "sede":   sd_val,
+                "resp":   rp_val,
+                "obs":    ob_val,
+            })
 
         if not lista_fisica:
             messagebox.showwarning(
@@ -1512,10 +1793,17 @@ class ConciliadorUniversal:
         self.log(f"Hoja objetivo: [{nombre_hoja}]  "
                  f"({ws.max_row} filas x {ws.max_column} cols)", "info")
 
-        # Obtener columnas mapeadas dinamicamente
+        # Casillas de verificacion (chulos) y columnas mapeadas
+        usar_serial = self.chk_col_serial.get()
+        usar_equipo = self.chk_col_equipo.get()
+        usar_sede   = self.chk_col_sede.get()
+        usar_resp   = self.chk_col_resp.get()
+        usar_verif  = self.chk_col_verif.get()
+
         col_sede   = self._get_col_idx(self.col_sede_var.get(), default=self.COL_SEDE)
         col_equipo = self._get_col_idx(self.col_equipo_var.get(), default=self.COL_EQUIPO)
         col_obs    = self._get_col_idx(self.col_serial_var.get(), default=self.COL_OBS)
+        col_resp   = self._get_col_idx(self.col_resp_var.get(), default=self.COL_RESP) if hasattr(self, "col_resp_var") else 9
         col_verif  = self._get_col_idx(self.col_verif_var.get(), default=self.COL_VERIF)
 
         # Detectar fila de encabezados y de datos
@@ -1524,7 +1812,13 @@ class ConciliadorUniversal:
         total_row = self._detectar_fila_total(ws, data_start)
 
         self.log(f"Encabezados en F{hdr_row} | Datos desde F{data_start} hasta F{total_row - 1}", "info")
-        self.log(f"Columnas activas: Serial=Col {get_column_letter(col_obs)}, Host=Col {get_column_letter(col_equipo)}, Sede=Col {get_column_letter(col_sede)}, Auditoria=Col {get_column_letter(col_verif)}", "ok")
+        cols_msg = []
+        if usar_serial: cols_msg.append(f"Serial=Col {get_column_letter(col_obs)}")
+        if usar_equipo: cols_msg.append(f"Host=Col {get_column_letter(col_equipo)}")
+        if usar_sede:   cols_msg.append(f"Sede=Col {get_column_letter(col_sede)}")
+        if usar_resp:   cols_msg.append(f"Resp=Col {get_column_letter(col_resp)}")
+        if usar_verif:  cols_msg.append(f"Auditoria=Col {get_column_letter(col_verif)}")
+        self.log(f"Columnas activas: {' | '.join(cols_msg)}", "ok")
 
         # --- Detectar duplicados en el Excel ----------------------------
         seriales_vistos = {}   # sn -> (fila, texto_serial_original)
@@ -1585,14 +1879,15 @@ class ConciliadorUniversal:
             for idx_f, eq in enumerate(lista_fisica):
                 if idx_f in procesados_fisica:
                     continue
-                # Match por serial
-                for s_celda in seriales_celda:
-                    if similitud_serial(eq["serial"], s_celda):
-                        coincidencia = eq
-                        idx_match    = idx_f
-                        break
-                # Match por nombre de equipo (fallback)
-                if not coincidencia:
+                # Match por serial (si serial esta habilitado con chulo)
+                if usar_serial and eq["serial"]:
+                    for s_celda in seriales_celda:
+                        if similitud_serial(eq["serial"], s_celda):
+                            coincidencia = eq
+                            idx_match    = idx_f
+                            break
+                # Match por nombre de equipo (si equipo esta habilitado con chulo)
+                if not coincidencia and usar_equipo and eq["equipo"]:
                     eq_n  = normalizar(eq["equipo"])
                     cel_n = normalizar(equipo_celda)
                     if eq_n and cel_n and (eq_n == cel_n or
@@ -1606,30 +1901,43 @@ class ConciliadorUniversal:
                 procesados_fisica.add(idx_match)
                 estado = coincidencia["estado"]
 
-                # Actualizar nombre de equipo
-                ws.cell(r, col_equipo).value = coincidencia["equipo"]
+                # Actualizar nombre de equipo (si activo)
+                if usar_equipo and coincidencia["equipo"]:
+                    ws.cell(r, col_equipo).value = coincidencia["equipo"]
 
-                # Actualizar serial corregido
-                texto_obs = str(ws.cell(r, col_obs).value or "")
-                serial_ok = f"Serial equipo: {coincidencia['serial']}"
-                m_modelo  = re.search(r"(?i)(Modelo\s*:.+)", texto_obs)
-                if m_modelo:
-                    serial_ok += f"; {m_modelo.group(1).strip()}"
-                ws.cell(r, col_obs).value = serial_ok
+                # Actualizar serial corregido (si activo)
+                if usar_serial and coincidencia["serial"]:
+                    texto_obs = str(ws.cell(r, col_obs).value or "")
+                    serial_ok = f"Serial equipo: {coincidencia['serial']}"
+                    m_modelo  = re.search(r"(?i)(Modelo\s*:.+)", texto_obs)
+                    if m_modelo:
+                        serial_ok += f"; {m_modelo.group(1).strip()}"
+                    ws.cell(r, col_obs).value = serial_ok
 
-                # Marcar en columna de resultado
-                ws.cell(r, col_verif).value = estado
-                if normalizar(estado) in ("OK", "VERIFICADO"):
-                    ws.cell(r, col_verif).font  = FONT_CHECK
-                    ws.cell(r, col_verif).fill  = FILL_OK
-                    contadores["ok"] += 1
+                # Actualizar responsable (si activo y presente)
+                if usar_resp and coincidencia.get("resp"):
+                    ws.cell(r, col_resp).value = coincidencia["resp"]
+
+                # Marcar en columna de resultado (si activo)
+                if usar_verif:
+                    ws.cell(r, col_verif).value = estado
+                    if normalizar(estado) in ("OK", "VERIFICADO"):
+                        ws.cell(r, col_verif).font  = FONT_CHECK
+                        ws.cell(r, col_verif).fill  = FILL_OK
+                        contadores["ok"] += 1
+                    else:
+                        ws.cell(r, col_verif).font  = FONT_TRASL
+                        ws.cell(r, col_verif).fill  = FILL_TRASL
+                        contadores["traslado"] += 1
+
+                    ws.cell(r, col_verif).alignment = Alignment(
+                        horizontal="center")
                 else:
-                    ws.cell(r, col_verif).font  = FONT_TRASL
-                    ws.cell(r, col_verif).fill  = FILL_TRASL
-                    contadores["traslado"] += 1
+                    if normalizar(estado) in ("OK", "VERIFICADO"):
+                        contadores["ok"] += 1
+                    else:
+                        contadores["traslado"] += 1
 
-                ws.cell(r, col_verif).alignment = Alignment(
-                    horizontal="center")
                 self.log(
                     f"[{estado}] F{r} -> {coincidencia['equipo']} | "
                     f"{coincidencia['serial']}", "ok"
@@ -1637,20 +1945,22 @@ class ConciliadorUniversal:
             else:
                 if ws.cell(r, 2).value:
                     if r in filas_dup:
-                        ws.cell(r, col_verif).value = "Duplicado"
-                        ws.cell(r, col_verif).font  = Font(
-                            name="Calibri", size=10, bold=True, color="7F6000")
-                        ws.cell(r, col_verif).fill  = FILL_DUP
-                        # Insertar comentario / nota explicativa en la celda
-                        nota = filas_dup[r]
-                        ws.cell(r, col_verif).comment = Comment(
-                            f"Auditoría: {nota}", "Auditor TI"
-                        )
+                        if usar_verif:
+                            ws.cell(r, col_verif).value = "Duplicado"
+                            ws.cell(r, col_verif).font  = Font(
+                                name="Calibri", size=10, bold=True, color="7F6000")
+                            ws.cell(r, col_verif).fill  = FILL_DUP
+                            # Insertar comentario / nota explicativa en la celda
+                            nota = filas_dup[r]
+                            ws.cell(r, col_verif).comment = Comment(
+                                f"Auditoría: {nota}", "Auditor TI"
+                            )
                         contadores["dup"] += 1
                     else:
-                        ws.cell(r, col_verif).value = "Sin chequear"
-                        ws.cell(r, col_verif).font  = FONT_UNCHK
-                        ws.cell(r, col_verif).fill  = FILL_UNCHK
+                        if usar_verif:
+                            ws.cell(r, col_verif).value = "Sin chequear"
+                            ws.cell(r, col_verif).font  = FONT_UNCHK
+                            ws.cell(r, col_verif).fill  = FILL_UNCHK
                         contadores["sin_chequear"] += 1
 
         # --- Altas: equipos fisicos NO en el Excel ----------------------
@@ -1676,25 +1986,30 @@ class ConciliadorUniversal:
         for idx_a, alta in enumerate(altas):
             insert_r = total_row + idx_a
             ws.insert_rows(insert_r)
-            ws.cell(insert_r, 1).value                   = insert_r - hdr_row
+            ws.cell(insert_r, 1).value                   = alta["item"] if alta["item"] else (insert_r - hdr_row)
             ws.cell(insert_r, 2).value                   = "CLEMONT"
-            ws.cell(insert_r, col_sede).value            = alta["sede"]
-            ws.cell(insert_r, col_equipo).value          = alta["equipo"]
+            if usar_sede:
+                ws.cell(insert_r, col_sede).value        = alta["sede"]
+            if usar_equipo:
+                ws.cell(insert_r, col_equipo).value      = alta["equipo"]
             ws.cell(insert_r, 5).value                   = "WINDOWS 11 PRO"
             ws.cell(insert_r, 6).value                   = "Microsoft"
             ws.cell(insert_r, 7).value                   = "Sistema operativo"
             ws.cell(insert_r, 8).value                   = 1
+            if usar_resp and alta.get("resp"):
+                ws.cell(insert_r, col_resp).value        = alta["resp"]
             ws.cell(insert_r, 10).value                  = "Activo"
-            ws.cell(insert_r, col_obs).value             = (
-                f"Serial equipo: {alta['serial']}")
-            ws.cell(insert_r, col_verif).value           = alta["estado"]
-            for c in range(1, col_verif + 1):
+            if usar_serial:
+                ws.cell(insert_r, col_obs).value         = f"Serial equipo: {alta['serial']}"
+            if usar_verif:
+                ws.cell(insert_r, col_verif).value       = alta["estado"]
+            for c in range(1, max(col_verif, ws.max_column) + 1):
                 ws.cell(insert_r, c).font   = FONT_BASE
                 ws.cell(insert_r, c).border = THIN_BORDER
                 ws.cell(insert_r, c).fill   = FILL_ALTA
-            ws.cell(insert_r, col_verif).font = FONT_CHECK
-            ws.cell(insert_r, col_verif).alignment = Alignment(
-                horizontal="center")
+            if usar_verif:
+                ws.cell(insert_r, col_verif).font = FONT_CHECK
+                ws.cell(insert_r, col_verif).alignment = Alignment(horizontal="center")
             self.log(f"Insertado alta: {alta['equipo']} en F{insert_r}", "ok")
 
         nuevo_total_row = total_row + len(altas)
@@ -1731,13 +2046,22 @@ class ConciliadorUniversal:
         )
 
         # --- Guardar ----------------------------------------------------
-        dir_s, nom_orig = os.path.split(ruta)
-        nom_salida = (
-            "AUDITADO_" + nom_orig
-            if not nom_orig.startswith("AUDITADO_")
-            else nom_orig
-        )
-        ruta_guardado = os.path.join(dir_s, nom_salida)
+        ruta_salida_custom = self.ruta_salida.get().strip() if hasattr(self, "ruta_salida") else ""
+        if ruta_salida_custom:
+            ruta_guardado = ruta_salida_custom
+            if not ruta_guardado.lower().endswith(".xlsx"):
+                ruta_guardado += ".xlsx"
+            nom_salida = os.path.basename(ruta_guardado)
+        else:
+            dir_s, nom_orig = os.path.split(ruta)
+            nom_salida = (
+                "AUDITADO_" + nom_orig
+                if not nom_orig.startswith("AUDITADO_")
+                else nom_orig
+            )
+            ruta_guardado = os.path.join(dir_s, nom_salida)
+
+        self.ruta_salida.set(ruta_guardado)
         wb.save(ruta_guardado)
 
         self.log("=" * 58, "info")
@@ -1747,7 +2071,7 @@ class ConciliadorUniversal:
         self.log(f"  Sin chequear      : {contadores['sin_chequear']}", "info")
         self.log(f"  Duplicados        : {contadores['dup']}", "warn")
         self.log(f"  Altas (nuevos)    : {len(altas)}", "warn")
-        self.log(f"  Archivo guardado  : {nom_salida}", "info")
+        self.log(f"  Archivo guardado  : {ruta_guardado}", "info")
         self.log("=" * 58, "info")
 
         messagebox.showinfo(
@@ -1757,7 +2081,8 @@ class ConciliadorUniversal:
             f"Sin chequear     : {contadores['sin_chequear']}\n"
             f"Duplicados       : {contadores['dup']}\n"
             f"Altas nuevas     : {len(altas)}\n\n"
-            f"Guardado como: {nom_salida}"
+            f"Guardado exitosamente en:\n{ruta_guardado}\n\n"
+            f"Puedes abrirlo directamente con los botones 'Abrir Excel Auditado' o 'Abrir Carpeta'."
         )
 
     # ------------------------------------------------------------------
