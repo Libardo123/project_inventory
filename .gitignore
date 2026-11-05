@@ -1,5 +1,6 @@
 # Archivos generados por el script (no subir al repo)
 AUDITADO_*.xlsx
+etiquetas_qr/
 
 # Archivos temporales de Python
 __pycache__/
@@ -22,4 +23,3 @@ desktop.ini
 
 # Logs
 *.log
-

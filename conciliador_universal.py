@@ -2,7 +2,7 @@
 """
 conciliador_universal.py
 Herramienta de auditoria y conciliacion de inventario de equipos.
-Version 2.0  -  Python 3.x + Tkinter + openpyxl
+Version 3.0  -  Python 3.x + Tkinter + openpyxl + qrcode + Pillow
 
 Novedades v2:
   - Pegado masivo desde Excel (Ctrl+C en Excel -> boton Pegar en la app)
@@ -11,13 +11,20 @@ Novedades v2:
   - Hoja 'Reporte de Auditoria' con colores + autofilter
   - Autofilter y freeze panes en la hoja de inventario
   - Correccion automatica de la formula TOTAL EQUIPOS
-  - Formato de hoja siempre igual al de Clemont (col K=serial, L=verificado)
+  - Selector de hoja con dropdown automatico
+
+Novedades v3:
+  - Modulo QR integrado (segunda pestana)
+  - Generacion de etiquetas QR PNG por equipo (LAP / MON / TAB)
+  - Planilla de impresion en carta (5 col x 6 fil = 30 etiquetas/hoja)
+  - Apertura automatica de la carpeta de salida
 """
 
 import os
 import re
 import sys
 import io
+import subprocess
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from datetime import datetime
@@ -30,6 +37,16 @@ from openpyxl.comments import Comment
 # Forzar UTF-8 en la salida de consola (Windows)
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
+
+# ---------------------------------------------------------------------------
+# Deteccion de librerias QR (opcional - degradacion elegante)
+# ---------------------------------------------------------------------------
+try:
+    import qrcode
+    from PIL import Image, ImageDraw, ImageFont
+    QR_DISPONIBLE = True
+except ImportError:
+    QR_DISPONIBLE = False
 
 # ---------------------------------------------------------------------------
 # Utilidades de comparacion de seriales
@@ -155,6 +172,32 @@ HDR_PURPLE = PatternFill(start_color="7030A0", end_color="7030A0", fill_type="so
 
 
 # ---------------------------------------------------------------------------
+# Utilidades de fuentes para generacion de etiquetas QR (Pillow)
+# ---------------------------------------------------------------------------
+
+def _obtener_fuente(size, bold=False):
+    """Retorna un ImageFont de TrueType en Windows o fallback a default."""
+    if not QR_DISPONIBLE:
+        return None
+    candidatas = [
+        f"C:/Windows/Fonts/{'arialbd.ttf' if bold else 'arial.ttf'}",
+        f"C:/Windows/Fonts/{'calibrib.ttf' if bold else 'calibri.ttf'}",
+        f"C:/Windows/Fonts/{'segoeuib.ttf' if bold else 'segoeui.ttf'}",
+        'arialbd.ttf' if bold else 'arial.ttf',
+        'calibrib.ttf' if bold else 'calibri.ttf',
+    ]
+    for r in candidatas:
+        try:
+            return ImageFont.truetype(r, size)
+        except Exception:
+            pass
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Clase principal
 # ---------------------------------------------------------------------------
 
@@ -240,12 +283,15 @@ class ConciliadorUniversal:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Conciliador de Inventario Clemont v2.0")
-        self.root.geometry("1020x800")
+        self.root.title("Conciliador de Inventario Clemont v3.0")
+        self.root.geometry("1020x820")
         self.root.configure(bg="#F0F4F8")
         self.ruta_excel  = tk.StringVar()
         self.nombre_hoja = tk.StringVar()
         self.hojas_disponibles = []          # lista de hojas del Excel cargado
+        self.qr_empresa = tk.StringVar(value="CLEMONT")
+        self.qr_formato = tk.StringVar(value="50x25mm")
+        self.qr_scan_input = tk.StringVar()
         self._construir_gui()
 
     # ------------------------------------------------------------------
@@ -256,12 +302,34 @@ class ConciliadorUniversal:
         # Titulo
         tk.Label(
             self.root,
-            text="  Conciliador de Inventario - Clemont  v2.0",
+            text="  Conciliador de Inventario - Clemont  v3.0",
             font=("Arial", 13, "bold"), bg="#1F4E78", fg="white", pady=10
         ).pack(fill="x")
 
+        # ==============================================================
+        # Notebook con pestanas
+        # ==============================================================
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=8)
+
+        # -- Pestana 1: Conciliacion -----------------------------------
+        tab1 = tk.Frame(self.notebook, bg="#F0F4F8")
+        self.notebook.add(tab1, text="  Conciliacion de Inventario  ")
+
+        # -- Pestana 2: Modulo QR --------------------------------------
+        tab2 = tk.Frame(self.notebook, bg="#F0F4F8")
+        self.notebook.add(tab2, text="  Modulo QR  ")
+
+        self._construir_tab_conciliacion(tab1)
+        self._construir_tab_qr(tab2)
+
+    # ------------------------------------------------------------------
+    # Pestana 1 — Conciliacion
+    # ------------------------------------------------------------------
+
+    def _construir_tab_conciliacion(self, parent):
         # --- Bloque 1: archivo -------------------------------------------
-        frm1 = tk.LabelFrame(self.root, text="1. Archivo Excel",
+        frm1 = tk.LabelFrame(parent, text="1. Archivo Excel",
                               padx=10, pady=8, bg="#F0F4F8",
                               font=("Arial", 10, "bold"))
         frm1.pack(fill="x", padx=15, pady=(10, 2))
@@ -273,7 +341,7 @@ class ConciliadorUniversal:
                   bg="#1F4E78", fg="white",
                   font=("Arial", 9, "bold")).pack(side="left")
 
-        frm1b = tk.Frame(self.root, bg="#F0F4F8")
+        frm1b = tk.Frame(parent, bg="#F0F4F8")
         frm1b.pack(fill="x", padx=15, pady=(2, 6))
         tk.Label(frm1b, text="Hoja a auditar:",
                  bg="#F0F4F8", font=("Arial", 9, "bold")).pack(side="left")
@@ -298,7 +366,7 @@ class ConciliadorUniversal:
 
         # --- Bloque 2: tabla de equipos verificados ----------------------
         frm2 = tk.LabelFrame(
-            self.root,
+            parent,
             text="2. Lista de Equipos Verificados Fisicamente  "
                  "(Equipo | Serial Real | Estado | Sede)",
             padx=10, pady=6, bg="#F0F4F8", font=("Arial", 10, "bold")
@@ -348,7 +416,7 @@ class ConciliadorUniversal:
 
         # Tabla Treeview
         cols = ("Equipo / Host", "Serial Real", "Estado", "Sede")
-        self.tree = ttk.Treeview(frm2, columns=cols, show="headings", height=11)
+        self.tree = ttk.Treeview(frm2, columns=cols, show="headings", height=10)
         for c in cols:
             self.tree.heading(c, text=c)
         self.tree.column("Equipo / Host", width=220)
@@ -370,7 +438,7 @@ class ConciliadorUniversal:
         self.root.bind("<Control-v>", lambda e: self._pegar_desde_portapapeles())
 
         # --- Bloque 3: boton ejecutar ------------------------------------
-        frm3 = tk.Frame(self.root, bg="#F0F4F8", pady=6)
+        frm3 = tk.Frame(parent, bg="#F0F4F8", pady=6)
         frm3.pack(fill="x", padx=15)
         tk.Button(
             frm3,
@@ -381,13 +449,13 @@ class ConciliadorUniversal:
         ).pack(fill="x")
 
         # --- Bloque 4: bitacora ------------------------------------------
-        frm4 = tk.LabelFrame(self.root, text="3. Bitacora",
+        frm4 = tk.LabelFrame(parent, text="3. Bitacora",
                               padx=10, pady=6, bg="#F0F4F8",
                               font=("Arial", 10, "bold"))
         frm4.pack(fill="both", expand=True, padx=15, pady=(2, 10))
 
         self.txt_log = tk.Text(frm4, bg="#1E1E1E", fg="#D4D4D4",
-                               font=("Consolas", 9), height=9)
+                               font=("Consolas", 9), height=8)
         self.txt_log.pack(fill="both", expand=True)
         self.txt_log.tag_config("ok",    foreground="#6BCF6B")
         self.txt_log.tag_config("warn",  foreground="#FFD700")
@@ -395,7 +463,580 @@ class ConciliadorUniversal:
         self.txt_log.tag_config("info",  foreground="#87CEEB")
 
     # ------------------------------------------------------------------
-    # Acciones de la GUI
+    # Pestana 2 — Modulo QR
+    # ------------------------------------------------------------------
+
+    def _construir_tab_qr(self, parent):
+        """Construye la interfaz del modulo de generacion de codigos QR."""
+        COLOR_BG = "#F0F4F8"
+
+        if not QR_DISPONIBLE:
+            # Si las librerias no estan instaladas, mostrar instrucciones
+            frm_err = tk.LabelFrame(parent, text="Librerias no encontradas",
+                                    padx=20, pady=20, bg="#FFF3CD",
+                                    font=("Arial", 11, "bold"))
+            frm_err.pack(fill="x", padx=20, pady=20)
+            msg = (
+                "Para usar el Modulo QR necesitas instalar las siguientes librerias:\n\n"
+                "   pip install \"qrcode[pil]\" Pillow\n\n"
+                "Abre una terminal (cmd o PowerShell) y ejecuta ese comando,\n"
+                "luego reinicia la aplicacion."
+            )
+            tk.Label(frm_err, text=msg, bg="#FFF3CD", fg="#856404",
+                     font=("Consolas", 10), justify="left").pack(anchor="w")
+            return
+
+        # Frame superior con 2 columnas para aprovechar el espacio horizontal
+        top_frame = tk.Frame(parent, bg=COLOR_BG)
+        top_frame.pack(fill="x", padx=15, pady=(8, 2))
+
+        # ---- Columna Izquierda: Fuente de datos (Equipos Clemont) --------
+        col_izq = tk.Frame(top_frame, bg=COLOR_BG)
+        col_izq.pack(side="left", fill="both", expand=True, padx=(0, 6))
+
+        frm_src = tk.LabelFrame(col_izq, text="1. Fuente de datos (Equipos Clemont)",
+                                 padx=10, pady=6, bg=COLOR_BG,
+                                 font=("Arial", 10, "bold"))
+        frm_src.pack(fill="both", expand=True)
+
+        n_lap = len(self.PRESET_CLEMONT)
+        n_tab = len(self.PRESET_TABLETS)
+        n_mon = len(self.PRESET_MONITORES)
+        total = n_lap + n_tab + n_mon
+
+        info_txt = (
+            f"Equipos verificados listos para rotulacion:\n"
+            f" • Laptops / PCs  :  {n_lap}  (LAP-2026-0001 al LAP-2026-{n_lap:04d})\n"
+            f" • Tablets        :  {n_tab}  (TAB-2026-0001 al TAB-2026-{n_tab:04d})\n"
+            f" • Monitores      : {n_mon}  (MON-2026-0001 al MON-2026-{n_mon:04d})\n"
+            f" TOTAL ACTIVOS    : {total} etiquetas a generar"
+        )
+        tk.Label(frm_src, text=info_txt, bg=COLOR_BG,
+                 font=("Consolas", 9), justify="left").pack(anchor="w")
+
+        # ---- Columna Derecha: Formato de etiqueta y Empresa --------------
+        col_der = tk.Frame(top_frame, bg=COLOR_BG)
+        col_der.pack(side="right", fill="both", expand=True, padx=(6, 0))
+
+        frm_fmt = tk.LabelFrame(col_der, text="2. Formato de etiqueta y Empresa",
+                                 padx=10, pady=6, bg=COLOR_BG,
+                                 font=("Arial", 10, "bold"))
+        frm_fmt.pack(fill="both", expand=True)
+
+        f_emp = tk.Frame(frm_fmt, bg=COLOR_BG)
+        f_emp.pack(fill="x", pady=(0, 4))
+        tk.Label(f_emp, text="Encabezado:", bg=COLOR_BG,
+                 font=("Arial", 9, "bold")).pack(side="left")
+        tk.Entry(f_emp, textvariable=self.qr_empresa, width=20,
+                 font=("Arial", 9, "bold")).pack(side="left", padx=6)
+
+        formatos = [
+            ("50 x 25 mm  — 30/hoja carta (Default temporal)", "50x25mm"),
+            ("67 x 25 mm  — 30/hoja carta (Avery 5160 estándar)", "67x25mm"),
+            ("100 x 50 mm — 10/hoja carta (Avery 5163, recomendado)", "100x50mm"),
+        ]
+        for texto, valor in formatos:
+            tk.Radiobutton(frm_fmt, text=texto, variable=self.qr_formato,
+                           value=valor, bg=COLOR_BG,
+                           font=("Arial", 9)).pack(anchor="w")
+
+        # ---- Seccion 3: Acciones principales -----------------------------
+        frm_acc = tk.LabelFrame(parent, text="3. Acciones de Generacion y Exportacion",
+                                 padx=10, pady=8, bg=COLOR_BG,
+                                 font=("Arial", 10, "bold"))
+        frm_acc.pack(fill="x", padx=15, pady=4)
+
+        btn_row = tk.Frame(frm_acc, bg=COLOR_BG)
+        btn_row.pack(fill="x")
+
+        tk.Button(btn_row,
+                  text="Generar 34 Etiquetas QR (PNG)",
+                  command=self._qr_generar_todos,
+                  bg="#1F4E78", fg="white",
+                  font=("Arial", 9, "bold"), padx=10, pady=6
+                  ).pack(side="left", padx=(0, 6))
+
+        tk.Button(btn_row,
+                  text="Crear Planillas de Impresion (Carta)",
+                  command=self._qr_crear_planilla,
+                  bg="#28A745", fg="white",
+                  font=("Arial", 9, "bold"), padx=10, pady=6
+                  ).pack(side="left", padx=(0, 6))
+
+        tk.Button(btn_row,
+                  text="Exportar Base con IDs a Excel",
+                  command=self._qr_exportar_excel,
+                  bg="#007BFF", fg="white",
+                  font=("Arial", 9, "bold"), padx=10, pady=6
+                  ).pack(side="left", padx=(0, 6))
+
+        tk.Button(btn_row,
+                  text="Abrir Carpeta de Salida",
+                  command=self._qr_abrir_carpeta,
+                  bg="#6C757D", fg="white",
+                  font=("Arial", 9), padx=10, pady=6
+                  ).pack(side="left")
+
+        # Etiqueta de estado
+        self.lbl_qr_estado = tk.Label(frm_acc, text="",
+                                       bg=COLOR_BG, fg="#1F7A1F",
+                                       font=("Arial", 9, "bold"))
+        self.lbl_qr_estado.pack(anchor="w", pady=(6, 0))
+
+        # ---- Seccion 4: Simulador / Lector de Escaneo en Campo -----------
+        frm_scan = tk.LabelFrame(parent, text="4. Lector / Verificador de Escaneo en Campo (Prueba en Vivo)",
+                                  padx=10, pady=6, bg=COLOR_BG,
+                                  font=("Arial", 10, "bold"))
+        frm_scan.pack(fill="x", padx=15, pady=4)
+
+        scan_row = tk.Frame(frm_scan, bg=COLOR_BG)
+        scan_row.pack(fill="x")
+
+        tk.Label(scan_row, text="Escanear ID o Serial:", bg=COLOR_BG,
+                 font=("Arial", 9, "bold")).pack(side="left")
+        e_scan = tk.Entry(scan_row, textvariable=self.qr_scan_input, width=28,
+                          font=("Consolas", 10, "bold"))
+        e_scan.pack(side="left", padx=8)
+        e_scan.bind("<Return>", self._qr_probar_escaneo)
+
+        tk.Button(scan_row, text="Consultar", command=self._qr_probar_escaneo,
+                  bg="#17A2B8", fg="white", font=("Arial", 9, "bold")).pack(side="left", padx=(0, 10))
+
+        self.lbl_scan_resultado = tk.Label(
+            scan_row, text="← Escanea un QR o escribe un ID (ej: LAP-2026-0001) y presiona Enter",
+            bg=COLOR_BG, fg="#555555", font=("Arial", 9)
+        )
+        self.lbl_scan_resultado.pack(side="left")
+
+        # ---- Seccion 5: Bitacora QR --------------------------------------
+        frm_log = tk.LabelFrame(parent, text="5. Bitacora de Actividades QR",
+                                  padx=10, pady=6, bg=COLOR_BG,
+                                  font=("Arial", 10, "bold"))
+        frm_log.pack(fill="both", expand=True, padx=15, pady=(4, 10))
+
+        self.txt_qr_log = tk.Text(frm_log, bg="#1E1E1E", fg="#D4D4D4",
+                                   font=("Consolas", 9), height=7)
+        self.txt_qr_log.pack(fill="both", expand=True)
+        self.txt_qr_log.tag_config("ok",    foreground="#6BCF6B")
+        self.txt_qr_log.tag_config("warn",  foreground="#FFD700")
+        self.txt_qr_log.tag_config("error", foreground="#FF6B6B")
+        self.txt_qr_log.tag_config("info",  foreground="#87CEEB")
+
+    # ------------------------------------------------------------------
+    # Modulo QR — Metodos de Generacion y Acciones
+    # ------------------------------------------------------------------
+
+    def log_qr(self, msg, tag="info"):
+        """Registra un mensaje en la bitacora de la pestana QR."""
+        if hasattr(self, "txt_qr_log") and self.txt_qr_log:
+            self.txt_qr_log.insert(tk.END, msg + "\n", tag)
+            self.txt_qr_log.see(tk.END)
+            self.root.update_idletasks()
+
+    def _obtener_lista_equipos_qr(self):
+        """
+        Retorna la lista completa de equipos con sus IDs de Asset Tag asignados:
+        - Laptops / PCs: LAP-2026-0001 ...
+        - Tablets:       TAB-2026-0001 ...
+        - Monitores:     MON-2026-0001 ...
+        """
+        equipos = []
+        # 1. Laptops y PCs (Preset Clemont)
+        for i, (eq, ser, est, sede) in enumerate(self.PRESET_CLEMONT, 1):
+            equipos.append({
+                "id": f"LAP-2026-{i:04d}",
+                "categoria": "LAP",
+                "tipo": "Laptop / PC",
+                "equipo": eq,
+                "serial": ser,
+                "sede": sede,
+                "responsable": "",
+                "estado": est
+            })
+
+        # 2. Tablets
+        for i, fila in enumerate(self.PRESET_TABLETS, 1):
+            ser_limpio = fila[10].replace("Serial:", "").replace("Serial :", "").strip()
+            equipos.append({
+                "id": f"TAB-2026-{i:04d}",
+                "categoria": "TAB",
+                "tipo": "Tablet",
+                "equipo": f"{fila[4]} ({fila[5]})",
+                "serial": ser_limpio,
+                "sede": fila[2],
+                "responsable": fila[8],
+                "estado": fila[9]
+            })
+
+        # 3. Monitores
+        for i, fila in enumerate(self.PRESET_MONITORES, 1):
+            ser_limpio = fila[10].replace("Serial:", "").replace("Serial :", "").strip()
+            equipos.append({
+                "id": f"MON-2026-{i:04d}",
+                "categoria": "MON",
+                "tipo": "Monitor",
+                "equipo": f"{fila[4]}",
+                "serial": ser_limpio,
+                "sede": fila[2],
+                "responsable": fila[8],
+                "estado": fila[9]
+            })
+
+        return equipos
+
+    def _generar_etiqueta_individual(self, item, formato="50x25mm", carpeta="etiquetas_qr"):
+        """
+        Genera una imagen PNG a 300 DPI de una etiqueta individual con:
+        - Codigo QR (codifica UNICAMENTE el ID_Activo, ej. LAP-2026-0001)
+        - Encabezado institucional (ej. CLEMONT · CONTROL DE ACTIVOS)
+        - ID del Activo en tipografia grande y destacada
+        - Nombre del equipo / host
+        - Serial del fabricante
+        - Sede fisica oficial
+        """
+        if not QR_DISPONIBLE:
+            return None
+
+        # Parametros por formato a 300 DPI
+        if formato == "100x50mm":
+            w, h = 1200, 600
+            qr_dim = 540
+            x_txt = 580
+            sz_hdr, sz_id, sz_eq, sz_sub = 28, 56, 32, 24
+        elif formato == "67x25mm":
+            w, h = 788, 300
+            qr_dim = 270
+            x_txt = 300
+            sz_hdr, sz_id, sz_eq, sz_sub = 18, 36, 22, 16
+        else:  # 50x25mm
+            w, h = 591, 295
+            qr_dim = 265
+            x_txt = 285
+            sz_hdr, sz_id, sz_eq, sz_sub = 15, 30, 18, 14
+
+        img = Image.new("RGB", (w, h), "white")
+        draw = ImageDraw.Draw(img)
+
+        # Generar QR — SOLO contiene el ID del activo
+        qr = qrcode.QRCode(
+            box_size=10,
+            border=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_M
+        )
+        qr.add_data(item["id"])
+        qr.make(fit=True)
+        qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        qr_img = qr_img.resize((qr_dim, qr_dim), Image.Resampling.LANCZOS)
+        img.paste(qr_img, (15, (h - qr_dim) // 2))
+
+        # Guia de corte perimetral sutil
+        draw.rectangle([(1, 1), (w - 2, h - 2)], outline="#C8C8C8", width=1)
+        # Separador vertical
+        draw.line([(qr_dim + 24, 12), (qr_dim + 24, h - 12)], fill="#E0E0E0", width=1)
+
+        f_hdr = _obtener_fuente(sz_hdr, bold=True)
+        f_id  = _obtener_fuente(sz_id, bold=True)
+        f_eq  = _obtener_fuente(sz_eq, bold=True)
+        f_sub = _obtener_fuente(sz_sub, bold=False)
+
+        empresa = self.qr_empresa.get().strip().upper() if hasattr(self, "qr_empresa") and self.qr_empresa.get() else "CLEMONT"
+        txt_hdr = f"{empresa}  ·  CONTROL DE ACTIVOS"
+
+        draw.text((x_txt, int(h * 0.08)), txt_hdr, fill="#1F4E78", font=f_hdr)
+        draw.text((x_txt, int(h * 0.22)), item["id"], fill="#000000", font=f_id)
+
+        eq_txt = item["equipo"]
+        if len(eq_txt) > 28:
+            eq_txt = eq_txt[:26] + ".."
+        draw.text((x_txt, int(h * 0.48)), eq_txt, fill="#222222", font=f_eq)
+
+        ser_txt = f"S/N: {item['serial']}"
+        if len(ser_txt) > 32:
+            ser_txt = ser_txt[:30] + ".."
+        draw.text((x_txt, int(h * 0.68)), ser_txt, fill="#444444", font=f_sub)
+
+        sede_txt = f"Sede: {item['sede']}"
+        draw.text((x_txt, int(h * 0.82)), sede_txt, fill="#666666", font=f_sub)
+
+        os.makedirs(carpeta, exist_ok=True)
+        clean_eq = re.sub(r"[^A-Za-z0-9_-]", "", item["equipo"])[:20]
+        ruta = os.path.join(carpeta, f"{item['id']}_{clean_eq}.png")
+        img.save(ruta, dpi=(300, 300))
+        return ruta
+
+    def _qr_generar_todos(self):
+        """Genera los archivos PNG individuales de todas las etiquetas."""
+        if not QR_DISPONIBLE:
+            messagebox.showerror("Error", "Las librerias qrcode y Pillow no estan disponibles.")
+            return
+
+        fmt = self.qr_formato.get()
+        equipos = self._obtener_lista_equipos_qr()
+        total = len(equipos)
+        carpeta = "etiquetas_qr"
+        os.makedirs(carpeta, exist_ok=True)
+
+        self.log_qr(f"=== INICIANDO GENERACION DE ETIQUETAS QR ({total} equipos) ===", "ok")
+        self.log_qr(f"Formato seleccionado: {fmt}  |  Carpeta destino: ./{carpeta}/", "info")
+
+        exitos = 0
+        for eq in equipos:
+            try:
+                ruta = self._generar_etiqueta_individual(eq, formato=fmt, carpeta=carpeta)
+                exitos += 1
+                self.log_qr(f"✔ [{eq['id']}] {eq['equipo']}  (S/N: {eq['serial']}) -> {os.path.basename(ruta)}", "ok")
+            except Exception as e:
+                self.log_qr(f"❌ Error al generar {eq['id']}: {e}", "error")
+
+        self.lbl_qr_estado.config(
+            text=f"✔ {exitos} de {total} etiquetas generadas con exito en ./{carpeta}/",
+            fg="#1F7A1F"
+        )
+        self.log_qr(f"=== GENERACION FINALIZADA: {exitos}/{total} etiquetas listas ===", "ok")
+        messagebox.showinfo(
+            "Etiquetas Generadas",
+            f"Se han generado {exitos} etiquetas QR en la carpeta:\n\n"
+            f"{os.path.abspath(carpeta)}\n\n"
+            "Ahora puedes presionar 'Crear Planillas de Impresion' para armar las hojas tamaño carta listas para imprimir."
+        )
+
+    def _qr_crear_planilla(self):
+        """Organiza las etiquetas generadas en cuadriculas de impresion tamaño carta."""
+        if not QR_DISPONIBLE:
+            messagebox.showerror("Error", "qrcode y Pillow no están disponibles.")
+            return
+
+        fmt = self.qr_formato.get()
+        equipos = self._obtener_lista_equipos_qr()
+        total = len(equipos)
+        carpeta = "etiquetas_qr"
+        os.makedirs(carpeta, exist_ok=True)
+
+        self.log_qr(f"=== ARMANDO PLANILLAS DE IMPRESION (TAMANO CARTA 300 DPI) ===", "ok")
+
+        # 1. Asegurar que las etiquetas individuales existan
+        rutas_etiquetas = []
+        for eq in equipos:
+            clean_eq = re.sub(r"[^A-Za-z0-9_-]", "", eq["equipo"])[:20]
+            ruta = os.path.join(carpeta, f"{eq['id']}_{clean_eq}.png")
+            if not os.path.exists(ruta):
+                ruta = self._generar_etiqueta_individual(eq, formato=fmt, carpeta=carpeta)
+            rutas_etiquetas.append((eq, ruta))
+
+        # Tamano Carta a 300 DPI: 2550 x 3300 px
+        PAGE_W, PAGE_H = 2550, 3300
+
+        if fmt == "100x50mm":
+            cols, rows = 2, 5
+            lbl_w, lbl_h = 1200, 600
+            gap_x, gap_y = 42, 10
+            margin_x = (PAGE_W - (cols * lbl_w + (cols - 1) * gap_x)) // 2
+            margin_y = 160
+        else:
+            cols, rows = 3, 10
+            lbl_w, lbl_h = 788, 300
+            gap_x, gap_y = 38, 6
+            margin_x = (PAGE_W - (cols * lbl_w + (cols - 1) * gap_x)) // 2
+            margin_y = 150
+
+        por_hoja = cols * rows
+        num_hojas = (total + por_hoja - 1) // por_hoja
+
+        empresa = self.qr_empresa.get().strip().upper() if hasattr(self, "qr_empresa") and self.qr_empresa.get() else "CLEMONT"
+        f_titulo = _obtener_fuente(28, bold=True)
+        f_sub = _obtener_fuente(18, bold=False)
+
+        planillas_generadas = []
+
+        for h_idx in range(num_hojas):
+            hoja_img = Image.new("RGB", (PAGE_W, PAGE_H), "white")
+            draw = ImageDraw.Draw(hoja_img)
+
+            num_hoja = h_idx + 1
+            txt_hdr = f"{empresa}  ·  PLANILLA DE ETIQUETAS QR (Hoja {num_hoja} de {num_hojas})"
+            txt_det = f"Formato: {fmt}  |  Resolucion: 300 DPI  |  Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            draw.text((margin_x, 40), txt_hdr, fill="#1F4E78", font=f_titulo)
+            draw.text((margin_x, 85), txt_det, fill="#666666", font=f_sub)
+            draw.line([(margin_x, 125), (PAGE_W - margin_x, 125)], fill="#B0B0B0", width=2)
+
+            start_i = h_idx * por_hoja
+            end_i = min(start_i + por_hoja, total)
+
+            for pos, i in enumerate(range(start_i, end_i)):
+                r = pos // cols
+                c = pos % cols
+                x = margin_x + c * (lbl_w + gap_x)
+                y = margin_y + r * (lbl_h + gap_y)
+
+                eq_obj, ruta_png = rutas_etiquetas[i]
+                try:
+                    lbl_img = Image.open(ruta_png).convert("RGB")
+                    if lbl_img.size != (lbl_w, lbl_h):
+                        lbl_img = lbl_img.resize((lbl_w, lbl_h), Image.Resampling.LANCZOS)
+                    hoja_img.paste(lbl_img, (x, y))
+
+                    # Linea de corte exterior sutil
+                    draw.rectangle([(x - 1, y - 1), (x + lbl_w + 1, y + lbl_h + 1)],
+                                   outline="#D0D0D0", width=1)
+                except Exception as e:
+                    self.log_qr(f"Error pegando etiqueta {eq_obj['id']}: {e}", "warn")
+
+            nombre_planilla = f"Planilla_Impresion_Hoja_{num_hoja}_de_{num_hojas}.png"
+            ruta_planilla = os.path.join(carpeta, nombre_planilla)
+            hoja_img.save(ruta_planilla, dpi=(300, 300))
+            planillas_generadas.append(ruta_planilla)
+            self.log_qr(f"✔ Planilla guardada: {nombre_planilla} ({end_i - start_i} etiquetas)", "ok")
+
+        self.lbl_qr_estado.config(
+            text=f"✔ {len(planillas_generadas)} planilla(s) de impresion guardadas en ./{carpeta}/",
+            fg="#1F7A1F"
+        )
+        self.log_qr(f"=== {len(planillas_generadas)} PLANILLAS LISTAS PARA IMPRIMIR ===", "ok")
+        messagebox.showinfo(
+            "Planillas Listas",
+            f"Se han generado {len(planillas_generadas)} planillas tamano Carta (300 DPI) en:\n\n"
+            f"{os.path.abspath(carpeta)}\n\n"
+            "Puedes abrirlas e imprimirlas en papel adhesivo tamano carta directamente."
+        )
+
+    def _qr_exportar_excel(self):
+        """Exporta un libro Excel con la base maestra de IDs y la hoja de escaneos de campo."""
+        carpeta = "etiquetas_qr"
+        os.makedirs(carpeta, exist_ok=True)
+        ruta_salida = os.path.join(carpeta, "Inventario_Equipos_Clemont_Con_QR.xlsx")
+
+        wb = openpyxl.Workbook()
+
+        # Hoja 1: Maestro_Activos
+        ws_m = wb.active
+        ws_m.title = "Maestro_Activos"
+
+        headers_m = [
+            "ID_Activo", "Categoria", "Tipo_Equipo", "Equipo / Host",
+            "Serial_Fabricante", "Ubicacion_Oficial", "Responsable", "Estado_Oficial"
+        ]
+        ws_m.append(headers_m)
+        for col_num in range(1, len(headers_m) + 1):
+            cell = ws_m.cell(1, col_num)
+            cell.font = FONT_HDR
+            cell.fill = HDR_BLUE
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        equipos = self._obtener_lista_equipos_qr()
+        for eq in equipos:
+            ws_m.append([
+                eq["id"],
+                eq["categoria"],
+                eq["tipo"],
+                eq["equipo"],
+                eq["serial"],
+                eq["sede"],
+                eq["responsable"],
+                eq["estado"]
+            ])
+
+        for row in range(2, len(equipos) + 2):
+            for col in range(1, len(headers_m) + 1):
+                c = ws_m.cell(row, col)
+                c.font = FONT_BASE
+                c.border = THIN_BORDER
+                if col == 1:
+                    c.font = FONT_BOLD
+                    c.alignment = Alignment(horizontal="center")
+
+        ws_m.auto_filter.ref = f"A1:H{len(equipos) + 1}"
+        anchos_m = [16, 12, 16, 28, 26, 26, 22, 14]
+        for i, ancho in enumerate(anchos_m, 1):
+            ws_m.column_dimensions[get_column_letter(i)].width = ancho
+
+        # Hoja 2: Escaneos_Campo
+        ws_e = wb.create_sheet(title="Escaneos_Campo")
+        headers_e = [
+            "ID_Escaneado", "Ubicacion_Hallada", "Fecha_Hora_Escaneo", "Operador", "Observaciones"
+        ]
+        ws_e.append(headers_e)
+        for col_num in range(1, len(headers_e) + 1):
+            cell = ws_e.cell(1, col_num)
+            cell.font = FONT_HDR
+            cell.fill = HDR_GREEN
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        for r in range(2, 36):
+            for c in range(1, len(headers_e) + 1):
+                cell = ws_e.cell(r, c)
+                cell.font = FONT_BASE
+                cell.border = THIN_BORDER
+
+        ws_e.auto_filter.ref = "A1:E36"
+        anchos_e = [18, 26, 22, 20, 30]
+        for i, ancho in enumerate(anchos_e, 1):
+            ws_e.column_dimensions[get_column_letter(i)].width = ancho
+
+        # Hoja 3: Instructivo
+        ws_i = wb.create_sheet(title="Instructivo_Auditoria")
+        ws_i.column_dimensions["A"].width = 6
+        ws_i.column_dimensions["B"].width = 85
+        ws_i.append(["", "INSTRUCTIVO PARA AUDITORIA DE INVENTARIO CON CODIGOS QR"])
+        ws_i.cell(1, 2).font = Font(name="Calibri", size=13, bold=True, color="1F4E78")
+        pasos = [
+            ("1", "Imprimir las etiquetas QR en pliegos adhesivos tamano carta e instalarlas en cada equipo."),
+            ("2", "Cada codigo QR codifica exclusivamente el ID alfanumerico (ej: LAP-2026-0001, MON-2026-0001)."),
+            ("3", "En campo, el auditor escanea el QR en la hoja 'Escaneos_Campo' usando lector de codigo de barras."),
+            ("4", "Se registra la ubicacion fisica donde realmente fue encontrado el equipo."),
+            ("5", "El Conciliador Universal compara 'Escaneos_Campo' contra 'Maestro_Activos'."),
+            ("6", "El sistema clasifica: CONCILIADO OK, TRASLADO NO REGISTRADO, FALTANTE o SOBRANTE.")
+        ]
+        for p_num, p_txt in pasos:
+            ws_i.append(["", f"{p_num}. {p_txt}"])
+            ws_i.cell(ws_i.max_row, 2).font = FONT_BASE
+
+        wb.save(ruta_salida)
+        self.log_qr(f"✔ Plantilla Excel exportada con 34 activos: {os.path.basename(ruta_salida)}", "ok")
+        messagebox.showinfo(
+            "Excel Exportado",
+            f"Se ha creado el archivo Excel con los 34 activos y la plantilla de escaneos:\n\n"
+            f"{os.path.abspath(ruta_salida)}"
+        )
+
+    def _qr_probar_escaneo(self, event=None):
+        """Busca en tiempo real el ID o Serial ingresado/escaneado para prueba en vivo."""
+        termino = self.qr_scan_input.get().strip().upper()
+        if not termino:
+            return
+
+        equipos = self._obtener_lista_equipos_qr()
+        encontrado = None
+
+        for eq in equipos:
+            if (eq["id"].upper() == termino or
+                normalizar(eq["serial"]) == normalizar(termino) or
+                eq["equipo"].upper() == termino):
+                encontrado = eq
+                break
+
+        if encontrado:
+            msg = (f"✔ MATCH: [{encontrado['id']}] {encontrado['equipo']} | "
+                   f"S/N: {encontrado['serial']} | Sede Oficial: {encontrado['sede']} | Estado: {encontrado['estado']}")
+            self.lbl_scan_resultado.config(text=msg, fg="#1F7A1F")
+            self.log_qr(f"Escaneo: '{termino}' -> Encontrado: {encontrado['id']} ({encontrado['equipo']})", "ok")
+        else:
+            msg = f"❌ Activo no encontrado para: '{termino}'"
+            self.lbl_scan_resultado.config(text=msg, fg="#C00000")
+            self.log_qr(f"Escaneo: '{termino}' -> NO REGISTRADO en la base", "warn")
+
+        self.qr_scan_input.set("")
+
+    def _qr_abrir_carpeta(self):
+        """Abre la carpeta etiquetas_qr en el explorador de archivos de Windows."""
+        carpeta = os.path.abspath("etiquetas_qr")
+        os.makedirs(carpeta, exist_ok=True)
+        try:
+            os.startfile(carpeta)
+        except Exception:
+            subprocess.Popen(["explorer", carpeta])
+
+    # ------------------------------------------------------------------
+    # Acciones de la GUI — Pestana Conciliacion
     # ------------------------------------------------------------------
 
     def _seleccionar_archivo(self):
