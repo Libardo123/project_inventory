@@ -244,7 +244,8 @@ class ConciliadorUniversal:
         self.root.geometry("1020x800")
         self.root.configure(bg="#F0F4F8")
         self.ruta_excel  = tk.StringVar()
-        self.nombre_hoja = tk.StringVar(value="Inventario de Equipos (2)")
+        self.nombre_hoja = tk.StringVar()
+        self.hojas_disponibles = []          # lista de hojas del Excel cargado
         self._construir_gui()
 
     # ------------------------------------------------------------------
@@ -274,14 +275,26 @@ class ConciliadorUniversal:
 
         frm1b = tk.Frame(self.root, bg="#F0F4F8")
         frm1b.pack(fill="x", padx=15, pady=(2, 6))
-        tk.Label(frm1b, text="Hoja objetivo:",
-                 bg="#F0F4F8", font=("Arial", 9)).pack(side="left")
-        tk.Entry(frm1b, textvariable=self.nombre_hoja, width=38,
-                 font=("Consolas", 9)).pack(side="left", padx=6)
-        tk.Button(frm1b, text="Ver hojas disponibles",
-                  command=self._mostrar_hojas,
-                  bg="#6C757D", fg="white",
-                  font=("Arial", 9)).pack(side="left", padx=4)
+        tk.Label(frm1b, text="Hoja a auditar:",
+                 bg="#F0F4F8", font=("Arial", 9, "bold")).pack(side="left")
+
+        # Dropdown (Combobox) — se llena automaticamente al cargar el Excel
+        self.combo_hojas = ttk.Combobox(
+            frm1b,
+            textvariable=self.nombre_hoja,
+            width=42,
+            font=("Consolas", 9),
+            state="readonly"
+        )
+        self.combo_hojas.pack(side="left", padx=6)
+        self.combo_hojas.set("← Carga un Excel para ver las hojas disponibles")
+
+        # Etiqueta de ayuda dinamica
+        self.lbl_hoja_info = tk.Label(
+            frm1b, text="", bg="#F0F4F8",
+            font=("Arial", 8), fg="#555555"
+        )
+        self.lbl_hoja_info.pack(side="left", padx=4)
 
         # --- Bloque 2: tabla de equipos verificados ----------------------
         frm2 = tk.LabelFrame(
@@ -392,18 +405,49 @@ class ConciliadorUniversal:
         )
         if ruta:
             self.ruta_excel.set(ruta)
-            self._mostrar_hojas()
+            self._cargar_hojas_en_combo()
 
-    def _mostrar_hojas(self):
+    def _cargar_hojas_en_combo(self):
+        """Lee las hojas del Excel y llena el dropdown automaticamente."""
         ruta = self.ruta_excel.get()
         if not ruta or not os.path.exists(ruta):
             return
         try:
             wb = openpyxl.load_workbook(ruta, read_only=True)
-            self.log("Hojas disponibles: " + " | ".join(wb.sheetnames), "info")
+            hojas = wb.sheetnames
             wb.close()
+
+            self.hojas_disponibles = hojas
+            self.combo_hojas["values"] = hojas
+
+            # Intentar preseleccionar la hoja de inventario automaticamente
+            hoja_auto = None
+            for h in hojas:
+                if "INVENTARIO" in h.upper():
+                    hoja_auto = h
+                    break
+            if hoja_auto is None:
+                hoja_auto = hojas[0]  # si no hay candidata, tomar la primera
+
+            self.combo_hojas.set(hoja_auto)
+            self.nombre_hoja.set(hoja_auto)
+
+            # Actualizar etiqueta informativa
+            n = len(hojas)
+            self.lbl_hoja_info.config(
+                text=f"{n} hoja{'s' if n != 1 else ''} encontrada{'s' if n != 1 else ''}  |  Seleccionada: [{hoja_auto}]",
+                fg="#1F7A1F"
+            )
+            self.log(f"Excel cargado. Hojas disponibles: {' | '.join(hojas)}", "info")
+            self.log(f"Hoja preseleccionada automaticamente: [{hoja_auto}]  "
+                     f"(puedes cambiarla en el dropdown)", "ok")
+
         except Exception as e:
             self.log("No se pudo leer el archivo: " + str(e), "warn")
+
+    def _mostrar_hojas(self):
+        """Mantener por compatibilidad — ahora hace lo mismo que _cargar_hojas_en_combo."""
+        self._cargar_hojas_en_combo()
 
     # ------ PEGADO DESDE PORTAPAPELES ------------------------------------
 
