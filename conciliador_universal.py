@@ -283,12 +283,22 @@ class ConciliadorUniversal:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Conciliador de Inventario Clemont v3.0")
-        self.root.geometry("1020x820")
+        self.root.title("Conciliador de Inventario Universal v3.1")
+        self.root.geometry("1040x840")
         self.root.configure(bg="#F0F4F8")
         self.ruta_excel  = tk.StringVar()
         self.nombre_hoja = tk.StringVar()
         self.hojas_disponibles = []          # lista de hojas del Excel cargado
+
+        # Mapeo dinamico de columnas (Universal para cualquier cliente)
+        self.col_serial_var = tk.StringVar(value="Col K (11) - Observaciones y Serial")
+        self.col_equipo_var = tk.StringVar(value="Col D (4) - Equipo/Servidor")
+        self.col_sede_var   = tk.StringVar(value="Col C (3) - Sede")
+        self.col_verif_var  = tk.StringVar(value="Col L (12) - Verificado")
+        self.chk_perifericos_clemont = tk.BooleanVar(value=True)
+
+        # Configuracion de Modulo QR
+        self.qr_fuente = tk.StringVar(value="auto")
         self.qr_empresa = tk.StringVar(value="CLEMONT")
         self.qr_formato = tk.StringVar(value="50x25mm")
         self.qr_scan_input = tk.StringVar()
@@ -356,6 +366,7 @@ class ConciliadorUniversal:
         )
         self.combo_hojas.pack(side="left", padx=6)
         self.combo_hojas.set("← Carga un Excel para ver las hojas disponibles")
+        self.combo_hojas.bind("<<ComboboxSelected>>", self._on_hoja_seleccionada)
 
         # Etiqueta de ayuda dinamica
         self.lbl_hoja_info = tk.Label(
@@ -363,6 +374,33 @@ class ConciliadorUniversal:
             font=("Arial", 8), fg="#555555"
         )
         self.lbl_hoja_info.pack(side="left", padx=4)
+
+        # --- Mapeo dinamico de columnas (Universal para cualquier cliente) --
+        frm1c = tk.Frame(parent, bg="#F0F4F8")
+        frm1c.pack(fill="x", padx=15, pady=(0, 6))
+
+        tk.Label(frm1c, text="Mapeo de Columnas:", bg="#F0F4F8",
+                 font=("Arial", 9, "bold")).pack(side="left")
+
+        tk.Label(frm1c, text="Serial:", bg="#F0F4F8", font=("Arial", 8)).pack(side="left", padx=(8, 2))
+        self.combo_col_serial = ttk.Combobox(frm1c, textvariable=self.col_serial_var, width=17, font=("Consolas", 8))
+        self.combo_col_serial.pack(side="left")
+
+        tk.Label(frm1c, text="Host/Equipo:", bg="#F0F4F8", font=("Arial", 8)).pack(side="left", padx=(8, 2))
+        self.combo_col_equipo = ttk.Combobox(frm1c, textvariable=self.col_equipo_var, width=17, font=("Consolas", 8))
+        self.combo_col_equipo.pack(side="left")
+
+        tk.Label(frm1c, text="Sede:", bg="#F0F4F8", font=("Arial", 8)).pack(side="left", padx=(8, 2))
+        self.combo_col_sede = ttk.Combobox(frm1c, textvariable=self.col_sede_var, width=14, font=("Consolas", 8))
+        self.combo_col_sede.pack(side="left")
+
+        tk.Label(frm1c, text="Resultado:", bg="#F0F4F8", font=("Arial", 8)).pack(side="left", padx=(8, 2))
+        self.combo_col_verif = ttk.Combobox(frm1c, textvariable=self.col_verif_var, width=15, font=("Consolas", 8))
+        self.combo_col_verif.pack(side="left")
+
+        tk.Checkbutton(frm1c, text="Anexar Tablets/Monitores Clemont",
+                       variable=self.chk_perifericos_clemont,
+                       bg="#F0F4F8", font=("Arial", 8)).pack(side="right")
 
         # --- Bloque 2: tabla de equipos verificados ----------------------
         frm2 = tk.LabelFrame(
@@ -490,29 +528,31 @@ class ConciliadorUniversal:
         top_frame = tk.Frame(parent, bg=COLOR_BG)
         top_frame.pack(fill="x", padx=15, pady=(8, 2))
 
-        # ---- Columna Izquierda: Fuente de datos (Equipos Clemont) --------
+        # ---- Columna Izquierda: Fuente de datos para los QR --------------
         col_izq = tk.Frame(top_frame, bg=COLOR_BG)
         col_izq.pack(side="left", fill="both", expand=True, padx=(0, 6))
 
-        frm_src = tk.LabelFrame(col_izq, text="1. Fuente de datos (Equipos Clemont)",
+        frm_src = tk.LabelFrame(col_izq, text="1. Fuente de datos para los QR",
                                  padx=10, pady=6, bg=COLOR_BG,
                                  font=("Arial", 10, "bold"))
         frm_src.pack(fill="both", expand=True)
 
-        n_lap = len(self.PRESET_CLEMONT)
-        n_tab = len(self.PRESET_TABLETS)
-        n_mon = len(self.PRESET_MONITORES)
-        total = n_lap + n_tab + n_mon
+        f_radio = tk.Frame(frm_src, bg=COLOR_BG)
+        f_radio.pack(fill="x", pady=(0, 2))
 
-        info_txt = (
-            f"Equipos verificados listos para rotulacion:\n"
-            f" • Laptops / PCs  :  {n_lap}  (LAP-2026-0001 al LAP-2026-{n_lap:04d})\n"
-            f" • Tablets        :  {n_tab}  (TAB-2026-0001 al TAB-2026-{n_tab:04d})\n"
-            f" • Monitores      : {n_mon}  (MON-2026-0001 al MON-2026-{n_mon:04d})\n"
-            f" TOTAL ACTIVOS    : {total} etiquetas a generar"
-        )
-        tk.Label(frm_src, text=info_txt, bg=COLOR_BG,
-                 font=("Consolas", 9), justify="left").pack(anchor="w")
+        tk.Radiobutton(f_radio, text="Automático (Usa tabla de verificación física)",
+                       variable=self.qr_fuente, value="auto", bg=COLOR_BG,
+                       font=("Arial", 8, "bold"),
+                       command=self._qr_actualizar_resumen_fuente).pack(anchor="w")
+        tk.Radiobutton(f_radio, text="Preset de prueba Clemont (34 activos demo)",
+                       variable=self.qr_fuente, value="preset", bg=COLOR_BG,
+                       font=("Arial", 8),
+                       command=self._qr_actualizar_resumen_fuente).pack(anchor="w")
+
+        self.lbl_qr_fuente_info = tk.Label(frm_src, text="", bg=COLOR_BG,
+                                           font=("Consolas", 8), justify="left")
+        self.lbl_qr_fuente_info.pack(anchor="w", pady=(2, 0))
+        self._qr_actualizar_resumen_fuente()
 
         # ---- Columna Derecha: Formato de etiqueta y Empresa --------------
         col_der = tk.Frame(top_frame, bg=COLOR_BG)
@@ -633,15 +673,90 @@ class ConciliadorUniversal:
             self.txt_qr_log.see(tk.END)
             self.root.update_idletasks()
 
+    def _qr_actualizar_resumen_fuente(self):
+        """Actualiza la etiqueta informativa de fuente de datos QR."""
+        if not hasattr(self, "lbl_qr_fuente_info") or not self.lbl_qr_fuente_info:
+            return
+        modo = self.qr_fuente.get() if hasattr(self, "qr_fuente") else "auto"
+        items_tree = self.tree.get_children() if hasattr(self, "tree") else []
+        n_tree = len(items_tree)
+
+        if modo == "preset" or (modo == "auto" and n_tree == 0):
+            n_lap = len(self.PRESET_CLEMONT)
+            n_tab = len(self.PRESET_TABLETS)
+            n_mon = len(self.PRESET_MONITORES)
+            total = n_lap + n_tab + n_mon
+            txt = (f"Fuente activa: Preset Clemont (Demo)\n"
+                   f" • {n_lap} Laptops/PCs | {n_tab} Tablets | {n_mon} Monitores\n"
+                   f" TOTAL: {total} activos listos para rotular")
+            if n_tree == 0 and modo == "auto":
+                txt += " (Tabla vacia, usando demo)"
+        else:
+            txt = (f"Fuente activa: Tabla de Verificación Física\n"
+                   f" • {n_tree} activos cargados en la tabla\n"
+                   f" TOTAL: {n_tree} etiquetas personalizadas a generar")
+        self.lbl_qr_fuente_info.config(text=txt)
+
     def _obtener_lista_equipos_qr(self):
         """
-        Retorna la lista completa de equipos con sus IDs de Asset Tag asignados:
-        - Laptops / PCs: LAP-2026-0001 ...
-        - Tablets:       TAB-2026-0001 ...
-        - Monitores:     MON-2026-0001 ...
+        Retorna la lista completa de equipos con sus IDs de Asset Tag asignados.
+        Universal:
+        - Si hay datos en la tabla (pegados desde cualquier Excel), los usa directamente.
+        - Si no hay datos o se selecciona Preset, usa los 34 activos Clemont demo.
         """
         equipos = []
-        # 1. Laptops y PCs (Preset Clemont)
+        modo = self.qr_fuente.get() if hasattr(self, "qr_fuente") else "auto"
+        items_tree = self.tree.get_children() if hasattr(self, "tree") else []
+
+        if (modo == "auto" and len(items_tree) > 0) or modo == "tree":
+            contadores = {}
+            for item_id in items_tree:
+                vals = self.tree.item(item_id)["values"]
+                nom_eq = str(vals[0] if len(vals) > 0 else "")
+                serial = str(vals[1] if len(vals) > 1 else "")
+                estado = str(vals[2] if len(vals) > 2 else "OK")
+                sede   = str(vals[3] if len(vals) > 3 else "")
+
+                nom_up = nom_eq.upper()
+                if any(k in nom_up for k in ["MONITOR", "PANTALLA", "LG 27", "VIEWSONIC", "SAMSUNG", "JANUS"]):
+                    cat = "MON"
+                    tipo = "Monitor"
+                elif any(k in nom_up for k in ["TAB", "GALAXY TAB", "IPAD"]):
+                    cat = "TAB"
+                    tipo = "Tablet"
+                elif any(k in nom_up for k in ["IMP", "EPSON", "PRINTER", "LASERJET", "HP DESKJET"]):
+                    cat = "IMP"
+                    tipo = "Impresora"
+                elif any(k in nom_up for k in ["SWITCH", "ROUTER", "ACCESS POINT", "FIREWALL"]):
+                    cat = "RED"
+                    tipo = "Redes"
+                elif any(k in nom_up for k in ["DESKTOP", "TORRE", "PC-", "ALL IN ONE"]):
+                    cat = "PC"
+                    tipo = "PC Escritorio"
+                elif any(k in nom_up for k in ["LAP", "MACBOOK", "PORTATIL", "NOTEBOOK"]):
+                    cat = "LAP"
+                    tipo = "Laptop"
+                else:
+                    cat = "LAP"
+                    tipo = "Equipo / Host"
+
+                contadores[cat] = contadores.get(cat, 0) + 1
+                correlativo = contadores[cat]
+                id_tag = f"{cat}-2026-{correlativo:04d}"
+
+                equipos.append({
+                    "id": id_tag,
+                    "categoria": cat,
+                    "tipo": tipo,
+                    "equipo": nom_eq,
+                    "serial": serial,
+                    "sede": sede,
+                    "responsable": "",
+                    "estado": estado
+                })
+            return equipos
+
+        # Fallback de conveniencia: Presets de Clemont (para pruebas y demostracion)
         for i, (eq, ser, est, sede) in enumerate(self.PRESET_CLEMONT, 1):
             equipos.append({
                 "id": f"LAP-2026-{i:04d}",
@@ -654,7 +769,6 @@ class ConciliadorUniversal:
                 "estado": est
             })
 
-        # 2. Tablets
         for i, fila in enumerate(self.PRESET_TABLETS, 1):
             ser_limpio = fila[10].replace("Serial:", "").replace("Serial :", "").strip()
             equipos.append({
@@ -668,7 +782,6 @@ class ConciliadorUniversal:
                 "estado": fila[9]
             })
 
-        # 3. Monitores
         for i, fila in enumerate(self.PRESET_MONITORES, 1):
             ser_limpio = fila[10].replace("Serial:", "").replace("Serial :", "").strip()
             equipos.append({
@@ -1073,6 +1186,9 @@ class ConciliadorUniversal:
             self.combo_hojas.set(hoja_auto)
             self.nombre_hoja.set(hoja_auto)
 
+            # Detectar columnas automaticamente en la hoja preseleccionada
+            self._auto_detectar_columnas_hoja(hoja_auto)
+
             # Actualizar etiqueta informativa
             n = len(hojas)
             self.lbl_hoja_info.config(
@@ -1089,6 +1205,107 @@ class ConciliadorUniversal:
     def _mostrar_hojas(self):
         """Mantener por compatibilidad — ahora hace lo mismo que _cargar_hojas_en_combo."""
         self._cargar_hojas_en_combo()
+
+    def _on_hoja_seleccionada(self, event=None):
+        """Disparado cuando el usuario cambia la hoja en el dropdown."""
+        hoja = self.nombre_hoja.get().strip()
+        if hoja:
+            self._auto_detectar_columnas_hoja(hoja)
+            self.lbl_hoja_info.config(
+                text=f"Hoja activa: [{hoja}] (columnas auto-detectadas)",
+                fg="#1F7A1F"
+            )
+
+    def _auto_detectar_columnas_hoja(self, hoja_especifica=None):
+        """Lee los encabezados de la hoja seleccionada y actualiza los dropdowns de mapeo."""
+        ruta = self.ruta_excel.get()
+        hoja = hoja_especifica or self.nombre_hoja.get().strip()
+        if not ruta or not os.path.exists(ruta) or not hoja:
+            return
+        try:
+            wb = openpyxl.load_workbook(ruta, read_only=True)
+            if hoja not in wb.sheetnames:
+                wb.close()
+                return
+            ws = wb[hoja]
+
+            fila_hdr = self._detectar_fila_encabezados(ws)
+            max_c = min(ws.max_column or 20, 30)
+
+            opciones_cols = []
+            col_serial_det = None
+            col_equipo_det = None
+            col_sede_det = None
+            col_verif_det = None
+
+            for c in range(1, max_c + 1):
+                letra = openpyxl.utils.get_column_letter(c)
+                val = str(ws.cell(fila_hdr, c).value or "").strip()
+                val_limpio = " ".join(val.split())
+                etiqueta = f"Col {letra} ({c})" + (f" - {val_limpio[:25]}" if val_limpio else "")
+                opciones_cols.append(etiqueta)
+
+                val_up = val_limpio.upper()
+                if not col_serial_det and any(k in val_up for k in ["SERIAL", "S/N", "OBSERVACION"]):
+                    col_serial_det = etiqueta
+                if not col_equipo_det and any(k in val_up for k in ["EQUIPO", "HOST", "DISPOSITIVO", "SERVIDOR"]):
+                    col_equipo_det = etiqueta
+                if not col_sede_det and any(k in val_up for k in ["SEDE", "UBICACION", "CIUDAD", "LUGAR"]):
+                    col_sede_det = etiqueta
+                if not col_verif_det and any(k in val_up for k in ["VERIFICADO", "ESTADO", "AUDITORIA", "CHECK"]):
+                    col_verif_det = etiqueta
+
+            wb.close()
+
+            # Poblar los dropdowns
+            for combo in (self.combo_col_serial, self.combo_col_equipo, self.combo_col_sede, self.combo_col_verif):
+                combo["values"] = opciones_cols
+
+            if col_serial_det: self.col_serial_var.set(col_serial_det)
+            if col_equipo_det: self.col_equipo_var.set(col_equipo_det)
+            if col_sede_det:   self.col_sede_var.set(col_sede_det)
+            if col_verif_det:  self.col_verif_var.set(col_verif_det)
+
+            self.log(f"Encabezados detectados en Fila {fila_hdr} de [{hoja}]:", "info")
+            self.log(f"   Serial: [{self.col_serial_var.get()}] | Host: [{self.col_equipo_var.get()}] | Sede: [{self.col_sede_var.get()}] | Auditoria: [{self.col_verif_var.get()}]", "ok")
+
+        except Exception as e:
+            self.log(f"Aviso al detectar columnas: {e}", "warn")
+
+    def _get_col_idx(self, texto, default):
+        """Extrae el indice numerico 1-based de un string como 'Col K (11) - Serial' o 'K' o '11'."""
+        if not texto:
+            return default
+        m = re.search(r"\((\d+)\)", str(texto))
+        if m:
+            return int(m.group(1))
+        m_col = re.search(r"Col\s+([A-Za-z]+)", str(texto), re.IGNORECASE)
+        if m_col:
+            return openpyxl.utils.column_index_from_string(m_col.group(1).upper())
+        s = str(texto).strip()
+        if s.isdigit():
+            return int(s)
+        if len(s) <= 3 and s.isalpha():
+            return openpyxl.utils.column_index_from_string(s.upper())
+        return default
+
+    def _detectar_fila_encabezados(self, ws):
+        """Detecta la fila de encabezados principales buscando coincidencias semanticas."""
+        for r in range(1, min(15, ws.max_row + 1)):
+            valores = [str(ws.cell(r, c).value or "").strip().upper() for c in range(1, min(25, ws.max_column + 1))]
+            coincidencias = sum(1 for v in valores if any(k in v for k in ["SERIAL", "EQUIPO", "HOST", "SEDE", "UBICACION", "ITEM", "CLIENTE", "RESPONSABLE", "OBSERVACION"]))
+            if coincidencias >= 2:
+                return r
+        return 5 # fallback Clemont
+
+    def _detectar_fila_total(self, ws, fila_inicio):
+        """Busca la fila de TOTALES posterior a los datos."""
+        for r in range(fila_inicio, ws.max_row + 1):
+            for c in range(1, min(6, ws.max_column + 1)):
+                val = str(ws.cell(r, c).value or "").upper()
+                if "TOTAL" in val:
+                    return r
+        return ws.max_row + 1
 
     # ------ PEGADO DESDE PORTAPAPELES ------------------------------------
 
@@ -1231,6 +1448,7 @@ class ConciliadorUniversal:
     def _actualizar_conteo(self):
         n = len(self.tree.get_children())
         self.lbl_conteo.config(text=f"{n} equipo(s) cargado(s)")
+        self._qr_actualizar_resumen_fuente()
 
     # ------------------------------------------------------------------
     # Logging
@@ -1294,26 +1512,30 @@ class ConciliadorUniversal:
         self.log(f"Hoja objetivo: [{nombre_hoja}]  "
                  f"({ws.max_row} filas x {ws.max_column} cols)", "info")
 
-        # Detectar fila TOTAL
-        total_row = None
-        for r in range(6, ws.max_row + 1):
-            val = str(ws.cell(r, 2).value or "")
-            if "TOTAL" in val.upper():
-                total_row = r
-                break
-        total_row = total_row or (ws.max_row + 1)
-        self.log(f"Fila TOTAL detectada: {total_row}", "info")
+        # Obtener columnas mapeadas dinamicamente
+        col_sede   = self._get_col_idx(self.col_sede_var.get(), default=self.COL_SEDE)
+        col_equipo = self._get_col_idx(self.col_equipo_var.get(), default=self.COL_EQUIPO)
+        col_obs    = self._get_col_idx(self.col_serial_var.get(), default=self.COL_OBS)
+        col_verif  = self._get_col_idx(self.col_verif_var.get(), default=self.COL_VERIF)
+
+        # Detectar fila de encabezados y de datos
+        hdr_row = self._detectar_fila_encabezados(ws)
+        data_start = hdr_row + 1
+        total_row = self._detectar_fila_total(ws, data_start)
+
+        self.log(f"Encabezados en F{hdr_row} | Datos desde F{data_start} hasta F{total_row - 1}", "info")
+        self.log(f"Columnas activas: Serial=Col {get_column_letter(col_obs)}, Host=Col {get_column_letter(col_equipo)}, Sede=Col {get_column_letter(col_sede)}, Auditoria=Col {get_column_letter(col_verif)}", "ok")
 
         # --- Detectar duplicados en el Excel ----------------------------
         seriales_vistos = {}   # sn -> (fila, texto_serial_original)
         nombres_vistos  = {}   # clave -> (fila, equipo_original)
         filas_dup       = {}   # r -> motivo del duplicado
 
-        for r in range(6, total_row):
-            obs    = str(ws.cell(r, self.COL_OBS).value or "")
-            equipo = normalizar(str(ws.cell(r, self.COL_EQUIPO).value or ""))
-            sede   = normalizar(str(ws.cell(r, self.COL_SEDE).value or ""))
-            nom_orig = str(ws.cell(r, self.COL_EQUIPO).value or "")
+        for r in range(data_start, total_row):
+            obs    = str(ws.cell(r, col_obs).value or "")
+            equipo = normalizar(str(ws.cell(r, col_equipo).value or ""))
+            sede   = normalizar(str(ws.cell(r, col_sede).value or ""))
+            nom_orig = str(ws.cell(r, col_equipo).value or "")
 
             for s in extraer_seriales(obs):
                 sn = normalizar_tolerante(s)
@@ -1335,7 +1557,7 @@ class ConciliadorUniversal:
             clave = f"{sede}_{equipo}"
             if equipo and clave in nombres_vistos:
                 fila_ant, n_ant = nombres_vistos[clave]
-                motivo_actual = f"Equipo repetido '{nom_orig}' en misma sede ({ws.cell(r, self.COL_SEDE).value}): coincide con fila {fila_ant}"
+                motivo_actual = f"Equipo repetido '{nom_orig}' en misma sede ({ws.cell(r, col_sede).value}): coincide con fila {fila_ant}"
                 motivo_anterior = f"Equipo repetido '{nom_orig}' en misma sede: coincide con fila {r}"
                 if r not in filas_dup:
                     filas_dup[r] = motivo_actual
@@ -1351,9 +1573,9 @@ class ConciliadorUniversal:
         procesados_fisica = set()
         contadores = {"ok": 0, "traslado": 0, "sin_chequear": 0, "dup": 0}
 
-        for r in range(6, total_row):
-            obs_celda    = str(ws.cell(r, self.COL_OBS).value or "")
-            equipo_celda = str(ws.cell(r, self.COL_EQUIPO).value or "")
+        for r in range(data_start, total_row):
+            obs_celda    = str(ws.cell(r, col_obs).value or "")
+            equipo_celda = str(ws.cell(r, col_equipo).value or "")
 
             seriales_celda = extraer_seriales(obs_celda) or [obs_celda]
 
@@ -1385,28 +1607,28 @@ class ConciliadorUniversal:
                 estado = coincidencia["estado"]
 
                 # Actualizar nombre de equipo
-                ws.cell(r, self.COL_EQUIPO).value = coincidencia["equipo"]
+                ws.cell(r, col_equipo).value = coincidencia["equipo"]
 
-                # Actualizar serial corregido en col K
-                texto_obs = str(ws.cell(r, self.COL_OBS).value or "")
+                # Actualizar serial corregido
+                texto_obs = str(ws.cell(r, col_obs).value or "")
                 serial_ok = f"Serial equipo: {coincidencia['serial']}"
                 m_modelo  = re.search(r"(?i)(Modelo\s*:.+)", texto_obs)
                 if m_modelo:
                     serial_ok += f"; {m_modelo.group(1).strip()}"
-                ws.cell(r, self.COL_OBS).value = serial_ok
+                ws.cell(r, col_obs).value = serial_ok
 
-                # Marcar en col L
-                ws.cell(r, self.COL_VERIF).value = estado
+                # Marcar en columna de resultado
+                ws.cell(r, col_verif).value = estado
                 if normalizar(estado) in ("OK", "VERIFICADO"):
-                    ws.cell(r, self.COL_VERIF).font  = FONT_CHECK
-                    ws.cell(r, self.COL_VERIF).fill  = FILL_OK
+                    ws.cell(r, col_verif).font  = FONT_CHECK
+                    ws.cell(r, col_verif).fill  = FILL_OK
                     contadores["ok"] += 1
                 else:
-                    ws.cell(r, self.COL_VERIF).font  = FONT_TRASL
-                    ws.cell(r, self.COL_VERIF).fill  = FILL_TRASL
+                    ws.cell(r, col_verif).font  = FONT_TRASL
+                    ws.cell(r, col_verif).fill  = FILL_TRASL
                     contadores["traslado"] += 1
 
-                ws.cell(r, self.COL_VERIF).alignment = Alignment(
+                ws.cell(r, col_verif).alignment = Alignment(
                     horizontal="center")
                 self.log(
                     f"[{estado}] F{r} -> {coincidencia['equipo']} | "
@@ -1415,20 +1637,20 @@ class ConciliadorUniversal:
             else:
                 if ws.cell(r, 2).value:
                     if r in filas_dup:
-                        ws.cell(r, self.COL_VERIF).value = "Duplicado"
-                        ws.cell(r, self.COL_VERIF).font  = Font(
+                        ws.cell(r, col_verif).value = "Duplicado"
+                        ws.cell(r, col_verif).font  = Font(
                             name="Calibri", size=10, bold=True, color="7F6000")
-                        ws.cell(r, self.COL_VERIF).fill  = FILL_DUP
+                        ws.cell(r, col_verif).fill  = FILL_DUP
                         # Insertar comentario / nota explicativa en la celda
                         nota = filas_dup[r]
-                        ws.cell(r, self.COL_VERIF).comment = Comment(
+                        ws.cell(r, col_verif).comment = Comment(
                             f"Auditoría: {nota}", "Auditor TI"
                         )
                         contadores["dup"] += 1
                     else:
-                        ws.cell(r, self.COL_VERIF).value = "Sin chequear"
-                        ws.cell(r, self.COL_VERIF).font  = FONT_UNCHK
-                        ws.cell(r, self.COL_VERIF).fill  = FILL_UNCHK
+                        ws.cell(r, col_verif).value = "Sin chequear"
+                        ws.cell(r, col_verif).font  = FONT_UNCHK
+                        ws.cell(r, col_verif).fill  = FILL_UNCHK
                         contadores["sin_chequear"] += 1
 
         # --- Altas: equipos fisicos NO en el Excel ----------------------
@@ -1442,64 +1664,70 @@ class ConciliadorUniversal:
 
         # --- Autofilter y freeze panes ----------------------------------
         ws.auto_filter.ref = (
-            f"A5:{get_column_letter(ws.max_column)}5"
+            f"A{hdr_row}:{get_column_letter(max(col_verif, ws.max_column))}{hdr_row}"
         )
-        ws.freeze_panes = "A6"
+        ws.freeze_panes = f"A{data_start}"
 
-        # --- Corregir formula TOTAL -------------------------------------
-        ws.cell(total_row, 8).value = f"=SUM(H6:H{total_row - 1})"
+        # --- Corregir formula TOTAL (si existe columna cantidad col 8) ---
+        if total_row <= ws.max_row:
+            ws.cell(total_row, 8).value = f"=SUM(H{data_start}:H{total_row - 1})"
 
         # --- Insertar altas antes del TOTAL -----------------------------
         for idx_a, alta in enumerate(altas):
             insert_r = total_row + idx_a
             ws.insert_rows(insert_r)
-            ws.cell(insert_r, 1).value                   = insert_r - 5
+            ws.cell(insert_r, 1).value                   = insert_r - hdr_row
             ws.cell(insert_r, 2).value                   = "CLEMONT"
-            ws.cell(insert_r, self.COL_SEDE).value       = alta["sede"]
-            ws.cell(insert_r, self.COL_EQUIPO).value     = alta["equipo"]
+            ws.cell(insert_r, col_sede).value            = alta["sede"]
+            ws.cell(insert_r, col_equipo).value          = alta["equipo"]
             ws.cell(insert_r, 5).value                   = "WINDOWS 11 PRO"
             ws.cell(insert_r, 6).value                   = "Microsoft"
             ws.cell(insert_r, 7).value                   = "Sistema operativo"
             ws.cell(insert_r, 8).value                   = 1
             ws.cell(insert_r, 10).value                  = "Activo"
-            ws.cell(insert_r, self.COL_OBS).value        = (
+            ws.cell(insert_r, col_obs).value             = (
                 f"Serial equipo: {alta['serial']}")
-            ws.cell(insert_r, self.COL_VERIF).value      = alta["estado"]
-            for c in range(1, self.COL_VERIF + 1):
+            ws.cell(insert_r, col_verif).value           = alta["estado"]
+            for c in range(1, col_verif + 1):
                 ws.cell(insert_r, c).font   = FONT_BASE
                 ws.cell(insert_r, c).border = THIN_BORDER
                 ws.cell(insert_r, c).fill   = FILL_ALTA
-            ws.cell(insert_r, self.COL_VERIF).font = FONT_CHECK
-            ws.cell(insert_r, self.COL_VERIF).alignment = Alignment(
+            ws.cell(insert_r, col_verif).font = FONT_CHECK
+            ws.cell(insert_r, col_verif).alignment = Alignment(
                 horizontal="center")
             self.log(f"Insertado alta: {alta['equipo']} en F{insert_r}", "ok")
 
         nuevo_total_row = total_row + len(altas)
-        ws.cell(nuevo_total_row, 8).value = (
-            f"=SUM(H6:H{nuevo_total_row - 1})"
-        )
+        if total_row <= ws.max_row:
+            ws.cell(nuevo_total_row, 8).value = (
+                f"=SUM(H{data_start}:H{nuevo_total_row - 1})"
+            )
 
-        # --- Tablas de perifericos --------------------------------------
-        tab_start = nuevo_total_row + 2
-        self._escribir_perifericos(
-            ws, tab_start,
-            titulo="TABLETS Y DISPOSITIVOS MOVILES VERIFICADOS",
-            color_hdr="7030A0",
-            datos=self.PRESET_TABLETS
-        )
-        mon_start = tab_start + len(self.PRESET_TABLETS) + 4
-        self._escribir_perifericos(
-            ws, mon_start,
-            titulo="MONITORES Y PANTALLAS VERIFICADAS (PERIFERICOS)",
-            color_hdr="203764",
-            datos=self.PRESET_MONITORES
-        )
+        # --- Tablas de perifericos (Opcional demo Clemont) --------------
+        if self.chk_perifericos_clemont.get():
+            tab_start = nuevo_total_row + 2
+            self._escribir_perifericos(
+                ws, tab_start,
+                titulo="TABLETS Y DISPOSITIVOS MOVILES VERIFICADOS",
+                color_hdr="7030A0",
+                datos=self.PRESET_TABLETS
+            )
+            mon_start = tab_start + len(self.PRESET_TABLETS) + 4
+            self._escribir_perifericos(
+                ws, mon_start,
+                titulo="MONITORES Y PANTALLAS VERIFICADAS (PERIFERICOS)",
+                color_hdr="203764",
+                datos=self.PRESET_MONITORES
+            )
 
         # --- Hoja Reporte de Auditoria ----------------------------------
         self._generar_reporte(
             wb, ws, nombre_hoja,
             total_row, len(altas), lista_fisica, altas,
-            contadores, filas_dup
+            contadores, filas_dup,
+            col_equipo=col_equipo, col_obs=col_obs,
+            col_verif=col_verif, col_sede=col_sede,
+            data_start=data_start
         )
 
         # --- Guardar ----------------------------------------------------
@@ -1574,7 +1802,15 @@ class ConciliadorUniversal:
 
     def _generar_reporte(self, wb, ws_inv, nombre_hoja,
                          total_row, n_altas, lista_fisica, altas,
-                         contadores, filas_dup):
+                         contadores, filas_dup,
+                         col_equipo=None, col_obs=None,
+                         col_verif=None, col_sede=None,
+                         data_start=6):
+        col_equipo = col_equipo or self.COL_EQUIPO
+        col_obs    = col_obs or self.COL_OBS
+        col_verif  = col_verif or self.COL_VERIF
+        col_sede   = col_sede or self.COL_SEDE
+
         nombre_rep = "Reporte de Auditoria"
         if nombre_rep in wb.sheetnames:
             wb.remove(wb[nombre_rep])
@@ -1616,11 +1852,11 @@ class ConciliadorUniversal:
             cell.alignment = Alignment(horizontal="center")
 
         item_rep = 1
-        for r in range(6, total_row + n_altas):
-            equipo = str(ws_inv.cell(r, self.COL_EQUIPO).value or "")
-            serial = str(ws_inv.cell(r, self.COL_OBS).value or "")
-            estado = str(ws_inv.cell(r, self.COL_VERIF).value or "")
-            sede   = str(ws_inv.cell(r, self.COL_SEDE).value or "")
+        for r in range(data_start, total_row + n_altas):
+            equipo = str(ws_inv.cell(r, col_equipo).value or "")
+            serial = str(ws_inv.cell(r, col_obs).value or "")
+            estado = str(ws_inv.cell(r, col_verif).value or "")
+            sede   = str(ws_inv.cell(r, col_sede).value or "")
             if not equipo and not serial:
                 continue
 
