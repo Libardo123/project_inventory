@@ -25,6 +25,7 @@ from datetime import datetime
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.comments import Comment
 
 # Forzar UTF-8 en la salida de consola (Windows)
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -159,6 +160,30 @@ HDR_PURPLE = PatternFill(start_color="7030A0", end_color="7030A0", fill_type="so
 
 class ConciliadorUniversal:
 
+    # ---- Presets de Equipos Clemont (Verificación física en sitio) ----
+    PRESET_CLEMONT = [
+        ("SERVICIO-CLIENTE1",       "T4N0CV16Z033184",  "OK",       "Sótano"),
+        ("LIDER-ECOMMERCE",         "T4N0CV16Z047186",  "OK",       "Sótano"),
+        ("Personalshopper",         "T4N0CV16Y999184",  "OK",       "Sótano"),
+        ("Personal-shopper1",       "RCN0CV02552949G",  "OK",       "Sótano"),
+        ("HAIBER",                  "TAN0KD004371447",  "OK",       "Sótano"),
+        ("ANALISTA-GHA",            "T4N0CV16Z13918D",  "OK",       "Administrativa 2do piso"),
+        ("LIDER_GHI",               "T6NXCV053386231",  "OK",       "Administrativa 2do piso"),
+        ("DESKTOP-FR2U7CB",         "R9N0CX01W87936A",  "OK",       "Administrativa 2do piso"),
+        ("DESKTOP-341T3CV",         "R8N0CV02K866319",  "OK",       "Administrativa 2do piso"),
+        ("Inteligencia",            "R9N0CX01W86636H",  "OK",       "Administrativa 2do piso"),
+        ("DESKTOP-KHDG30P",         "5CD50315P1",       "OK",       "Administrativa 2do piso"),
+        ("DESKTOP-34IT3CV",         "R8N0CV02K892318",  "OK",       "Showroom"),
+        ("DESKTOP-2CHSE06",         "R8N0CV02K825318",  "OK",       "Showroom"),
+        ("ALEXANDERPC",             "R4N0CV1115888165", "OK",       "Showroom"),
+        ("AUXILIAR-CONTABLE-ERIKA", "T4N0CV16B145189",  "OK",       "Showroom"),
+        ("DESKTOP-TQ9MEAZ",         "R8N0CV183189349",  "OK",       "Showroom"),
+        ("DESKTOP-5NSDMM5",         "T4NOCV16Z02518G",  "OK",       "Showroom"),
+        ("Natalia",                 "R8N0CV02K86131C",  "OK",       "Showroom"),
+        ("MacBook Pro 14\"",        "L04XFFHFQ4",       "OK",       "Showroom"),
+        ("DESKTOP-QODII8I",         "TANRCX04W552444",  "Traslado", "Showroom"),
+    ]
+
     # ---- Presetsde Tablets y Monitores (siempre iguales para Clemont) ------
     PRESET_TABLETS = [
         (1, "CLEMONT", "Sotano",   "Tablet", "Galaxy Tab S7 FE",  "SM-T733",
@@ -285,8 +310,12 @@ class ConciliadorUniversal:
         tk.Button(btn_bar, text="PEGAR DESDE EXCEL  (Ctrl+V)",
                   command=self._pegar_desde_portapapeles,
                   bg="#28A745", fg="white",
-                  font=("Arial", 10, "bold")).pack(side="left", padx=(0, 8))
-        tk.Button(btn_bar, text="+ Agregar fila manual",
+                  font=("Arial", 10, "bold")).pack(side="left", padx=(0, 6))
+        tk.Button(btn_bar, text="Cargar Preset Clemont",
+                  command=self._cargar_preset_clemont,
+                  bg="#007BFF", fg="white",
+                  font=("Arial", 9, "bold")).pack(side="left", padx=(0, 6))
+        tk.Button(btn_bar, text="+ Agregar fila",
                   command=self._agregar_fila,
                   bg="#17A2B8", fg="white",
                   font=("Arial", 9)).pack(side="left", padx=(0, 6))
@@ -377,6 +406,15 @@ class ConciliadorUniversal:
             self.log("No se pudo leer el archivo: " + str(e), "warn")
 
     # ------ PEGADO DESDE PORTAPAPELES ------------------------------------
+
+    def _cargar_preset_clemont(self):
+        """Carga la lista de equipos verificados en auditoria fisica de Clemont."""
+        self._limpiar_tabla()
+        for eq in self.PRESET_CLEMONT:
+            tag = "traslado" if eq[2] == "Traslado" else "ok"
+            self.tree.insert("", "end", values=eq, tags=(tag,))
+        self._actualizar_conteo()
+        self.log(f"Preset Clemont cargado ({len(self.PRESET_CLEMONT)} equipos verificados).", "info")
 
     def _pegar_desde_portapapeles(self):
         """
@@ -582,39 +620,47 @@ class ConciliadorUniversal:
         self.log(f"Fila TOTAL detectada: {total_row}", "info")
 
         # --- Detectar duplicados en el Excel ----------------------------
-        seriales_vistos = {}
-        nombres_vistos  = {}
-        filas_dup       = set()
+        seriales_vistos = {}   # sn -> (fila, texto_serial_original)
+        nombres_vistos  = {}   # clave -> (fila, equipo_original)
+        filas_dup       = {}   # r -> motivo del duplicado
 
         for r in range(6, total_row):
             obs    = str(ws.cell(r, self.COL_OBS).value or "")
             equipo = normalizar(str(ws.cell(r, self.COL_EQUIPO).value or ""))
             sede   = normalizar(str(ws.cell(r, self.COL_SEDE).value or ""))
+            nom_orig = str(ws.cell(r, self.COL_EQUIPO).value or "")
 
             for s in extraer_seriales(obs):
                 sn = normalizar_tolerante(s)
                 if len(sn) < 6:
                     continue
                 if sn in seriales_vistos:
-                    filas_dup.add(r)
-                    filas_dup.add(seriales_vistos[sn])
+                    fila_ant, s_ant = seriales_vistos[sn]
+                    motivo_actual = f"Serial repetido '{s}': coincide con fila {fila_ant}"
+                    motivo_anterior = f"Serial repetido '{s}': coincide con fila {r}"
+                    filas_dup[r] = motivo_actual
+                    if fila_ant not in filas_dup:
+                        filas_dup[fila_ant] = motivo_anterior
                     self.log(
-                        f"DUPLICADO serial '{s}' -> F{r} y "
-                        f"F{seriales_vistos[sn]}", "warn"
+                        f"DUPLICADO serial '{s}' -> F{r} y F{fila_ant}", "warn"
                     )
                 else:
-                    seriales_vistos[sn] = r
+                    seriales_vistos[sn] = (r, s)
 
             clave = f"{sede}_{equipo}"
             if equipo and clave in nombres_vistos:
-                filas_dup.add(r)
-                filas_dup.add(nombres_vistos[clave])
+                fila_ant, n_ant = nombres_vistos[clave]
+                motivo_actual = f"Equipo repetido '{nom_orig}' en misma sede ({ws.cell(r, self.COL_SEDE).value}): coincide con fila {fila_ant}"
+                motivo_anterior = f"Equipo repetido '{nom_orig}' en misma sede: coincide con fila {r}"
+                if r not in filas_dup:
+                    filas_dup[r] = motivo_actual
+                if fila_ant not in filas_dup:
+                    filas_dup[fila_ant] = motivo_anterior
                 self.log(
-                    f"DUPLICADO nombre '{ws.cell(r, self.COL_EQUIPO).value}' "
-                    f"-> F{r} y F{nombres_vistos[clave]}", "warn"
+                    f"DUPLICADO nombre '{nom_orig}' -> F{r} y F{fila_ant}", "warn"
                 )
             elif equipo:
-                nombres_vistos[clave] = r
+                nombres_vistos[clave] = (r, nom_orig)
 
         # --- Conciliacion fila por fila ---------------------------------
         procesados_fisica = set()
@@ -688,6 +734,11 @@ class ConciliadorUniversal:
                         ws.cell(r, self.COL_VERIF).font  = Font(
                             name="Calibri", size=10, bold=True, color="7F6000")
                         ws.cell(r, self.COL_VERIF).fill  = FILL_DUP
+                        # Insertar comentario / nota explicativa en la celda
+                        nota = filas_dup[r]
+                        ws.cell(r, self.COL_VERIF).comment = Comment(
+                            f"Auditoría: {nota}", "Auditor TI"
+                        )
                         contadores["dup"] += 1
                     else:
                         ws.cell(r, self.COL_VERIF).value = "Sin chequear"
@@ -903,7 +954,8 @@ class ConciliadorUniversal:
                 novedad  = "Novedad de Traslado"
                 fill_row = FILL_TRASL
             elif est_n == "DUPLICADO":
-                novedad  = "Fila duplicada - revisar"
+                motivo = filas_dup.get(r, "Fila duplicada en inventario")
+                novedad  = f"Duplicado: {motivo}"
                 fill_row = FILL_DUP
             elif "SIN" in est_n:
                 novedad  = "Pendiente de verificacion"
